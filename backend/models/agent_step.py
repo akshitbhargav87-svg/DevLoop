@@ -4,7 +4,10 @@ from uuid import uuid4
 from sqlalchemy import ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
-from database import Base
+if __package__ and __package__.startswith("backend."):
+    from backend.database import Base
+else:
+    from database import Base
 
 
 class AgentStep(Base):

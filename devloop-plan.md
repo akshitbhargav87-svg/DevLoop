@@ -13,8 +13,8 @@ applied locally, tests are run, and the system iterates (up to 3 times) if
 tests fail. A final resolution report is produced.
 
 **Stack:**
-- Backend: Python 3.11, FastAPI, LangGraph, `ibm-watsonx-ai`, `langchain-ibm`
-- LLM: IBM watsonx.ai — `ibm/granite-3-8b-instruct` via `ChatWatsonx`
+- Backend: Python 3.11, FastAPI, LangGraph, `langchain-ollama`
+- LLM: Ollama (local) — `qwen2.5-coder:1.5b` via `ChatOllama`
 - Frontend: React 18, TypeScript, Vite, Tailwind CSS
 - Repo inspection: `gitpython`, `subprocess` (pytest)
 - Storage: SQLite via synchronous SQLAlchemy (no migration tooling needed)
@@ -120,9 +120,9 @@ Tables are created via `Base.metadata.create_all()` on app startup.
 | `file_identification` | `{files: [{path, relevance_reason}]}` |
 | `change_inspection` | `{commits: [{sha, message, files_changed[]}]}` |
 | `hypothesis` | `{root_cause, affected_files[], fix_strategy, confidence}` |
-| `patch` | `{diff, files_modified[], description}` |
+| `patch` | `{patch, files_changed[], explanation}` |
 | `test_runner` | `{passed, failed, errors[], output_excerpt}` |
-| `report` | `{summary, evidence[], changes_made[], test_results}` |
+| `report` | `{root_cause, evidence, changes_made, test_results, iteration_count, patch_approved}` |
 
 ### ResolutionReport
 | Field | Type | Notes |
@@ -151,8 +151,7 @@ class WorkflowState(TypedDict):
     relevant_files:    dict          # structured evidence from FileIdentificationAgent
     recent_changes:    dict          # structured evidence from ChangeInspection
     hypothesis:        dict          # {root_cause, affected_files, fix_strategy, confidence}
-    patch_diff:        str
-    patch_description: str
+    patch_result:      dict          # {patch, files_changed[], explanation}
     patch_approved:    bool | None   # None = not yet decided
     test_output:       dict          # {passed, failed, errors, output_excerpt}
     test_passed:       bool
@@ -234,7 +233,7 @@ test_runner → test_passed?
 ### PatchAgent
 - **Inputs:** `hypothesis`, file contents fetched via `read_file` tool
 - **Task:** Produce a minimal unified diff implementing the fix strategy
-- **Output:** `{diff, files_modified[], description}`
+- **Output:** `{patch, files_changed[], explanation}`
 
 ### ReportAgent
 - **Inputs:** full `WorkflowState`
@@ -414,7 +413,7 @@ for the workflow state machine.
 - `PatchApprovalPanel` — visible only when status is `awaiting_approval`
 
 ### Integration (manual)
-- End-to-end run against `demo-target` with real watsonx.ai credentials
+- End-to-end run against `demo-target` with local Ollama (`qwen2.5-coder:1.5b`)
 - Confirm final report root cause matches "formula changed in rename refactor"
 
 ---
@@ -426,10 +425,7 @@ Python 3.11+, Node.js 20+, Git
 
 ### Environment (`backend/.env`)
 ```
-WATSONX_API_KEY=...
-WATSONX_PROJECT_ID=...
-WATSONX_URL=https://us-south.ml.cloud.ibm.com
-WATSONX_MODEL_ID=ibm/granite-3-8b-instruct
+OLLAMA_MODEL=qwen2.5-coder:1.5b
 DEMO_REPO_PATH=../demo-target
 ```
 
@@ -477,23 +473,21 @@ DevLoop/
       workflow_run.py
       agent_step.py
       resolution_report.py
+    workflow.py                     WorkflowState, StateGraph, event queue
     routers/
       runs.py                       POST/GET runs, SSE, approve
       reports.py                    GET report
-    services/
-      workflow_service.py           run_workflow + resume_workflow
     agents/
-      orchestrator.py               WorkflowState + StateGraph
       log_analysis.py
       file_identification.py
       hypothesis.py
       patch.py
-      report_agent.py
+      report.py
     tools/
       repo_tools.py                 clone, list_files, read_file, grep
       git_tools.py                  recent_commits, show_commit_diff
       test_tools.py                 apply_patch, run_pytest
-    watsonx_client.py
+    llm_client.py
     requirements.txt
   frontend/
     index.html
@@ -527,6 +521,11 @@ DevLoop/
   tests/
     test_tools.py
     test_workflow.py
+    test_log_analysis.py
+    test_file_identification.py
+    test_hypothesis.py
+    test_patch.py
+    test_report.py
 ```
 
 ---
@@ -556,7 +555,9 @@ patch is applied.
 **Relevant context:** The test file is committed in the buggy state. DevLoop must
 not create or modify tests during the workflow. The patch touches only `pricing.py`.
 
-**Status:** [ ] pending
+**Status:** [x] completed
+
+**Implemented:** `demo-target/` was created as the disposable synthetic bug repository with the deliberate pricing bug, three-commit history, and failing checkout test. It remains untracked by the main DevLoop repository.
 
 ---
 
@@ -574,9 +575,11 @@ a running server.
 - [ ] Create `backend/database.py` (sync SQLAlchemy engine, `Base`, `get_db`)
 - [ ] Create `backend/models/` — four model files matching the data model section
 - [ ] Create `backend/main.py` — app factory, CORS, `/health`, `create_all()` on startup
-- [ ] Write `backend/requirements.txt`: fastapi, uvicorn, sqlalchemy, pydantic-settings, gitpython, ibm-watsonx-ai, langchain-ibm, langgraph, python-dotenv, sse-starlette, pytest
+- [ ] Write `backend/requirements.txt`: fastapi, uvicorn, sqlalchemy, pydantic-settings, gitpython, langchain-ollama, langgraph, python-dotenv, sse-starlette, pytest
 
-**Status:** [ ] pending
+**Status:** [x] completed
+
+**Implemented:** FastAPI backend, synchronous SQLite/SQLAlchemy setup, configuration, four database models, CORS, startup table creation, and `/health`. The current development environment is Python 3.14.5.
 
 ---
 
@@ -601,33 +604,43 @@ nodes. These are the lowest-level primitives; all other backend work builds on t
 - [ ] Implement `backend/tools/test_tools.py`
 - [ ] Write `tests/test_tools.py`
 
-**Status:** [ ] pending
+**Status:** [x] completed
+
+**Implemented:** Repository, Git, patch, and pytest tools with workspace traversal protection and Windows-safe patch application. `tests/test_tools.py` passes all 6 tests.
 
 ---
 
-### ST-04 — watsonx.ai client and sub-agents
-**Intent:** Implement the `ChatWatsonx` factory and all five LLM sub-agents.
+### ST-04 — Ollama LLM client and sub-agents
+**Intent:** Implement the `ChatOllama` factory and all five LLM sub-agents.
 Each agent returns only structured evidence — no raw LLM text — and is callable
 as a standalone function for easy testing and mocking.
 
 **Expected outcomes:**
-- `watsonx_client.py` builds `ChatWatsonx` from config
+- `llm_client.py` builds `ChatOllama` from config (`qwen2.5-coder:1.5b`)
 - `log_analysis.py` — input: `stack_trace + description`; output: `{exception, module, line, call_chain[]}`
 - `file_identification.py` — input: `stack_trace + list_files output`; output: `{files: [{path, relevance_reason, rank}]}`; **no dependency on log_analysis output**
 - `hypothesis.py` — input: all prior evidence + `previous_failures`; output: `{root_cause, affected_files[], fix_strategy, confidence}`
-- `patch.py` — input: hypothesis + file contents; output: `{diff, files_modified[], description}`
+- `patch.py` — input: hypothesis + file contents; output: `{patch, files_changed[], explanation}`
 - `report_agent.py` — input: full state; output: ResolutionReport fields
 - All agents enforce JSON-only output via prompt; fall back gracefully on malformed LLM responses
 
 **Todo:**
-- [ ] Implement `backend/watsonx_client.py`
+- [ ] Implement `backend/llm_client.py`
 - [ ] Implement each of the five agent files
 - [ ] Add JSON output enforcement to all prompts
 - [ ] Add a safe JSON-parse helper that returns a fallback dict on failure
 
-**Status:** [ ] pending
+**Status:** [x] completed
+
+**Implemented:** LLM client and five sub-agents: log analysis, file identification, hypothesis generation, patch generation, and resolution reporting. Shared JSON parsing/fallback handling and mocked tests were added. Focused tests exercised successfully, including 2 log-analysis tests, 4 file-identification tests, 4 patch tests, and 5 report tests.
 
 ---
+
+## Current implementation checkpoint
+
+ST-01 through ST-04 are now implemented. The full pytest suite was also run with the repository virtual-environment Python. The expected remaining demo failure is isolated to `demo-target/tests/test_checkout.py::test_payment_with_coupon`, reporting `Expected 75.0, got 25.0`; this is intentional because `demo-target/` contains the deliberate bug that DevLoop is meant to repair.
+
+The next target is ST-05: LangGraph orchestration, genuine parallel analysis, approval gate, patch application, test iteration, event streaming, and final report integration.
 
 ### ST-05 — LangGraph orchestrator with approval gate
 **Intent:** Wire all nodes into a LangGraph `StateGraph` with genuine parallel
@@ -645,17 +658,20 @@ approval interrupt, and the iteration loop. Each node emits SSE events.
 - `tests/test_workflow.py` verifies the state machine with all LLM nodes mocked
 
 **Todo:**
-- [ ] Define `WorkflowState` TypedDict in `agents/orchestrator.py`
-- [ ] Implement all graph nodes as thin wrappers calling agent/tool functions
-- [ ] Wire `clone_repo` → fan-out to both `log_analysis` and `file_identification` using LangGraph `Send`
-- [ ] Wire fan-in from both parallel nodes into `change_inspection`
+- [x] Define `WorkflowState` TypedDict in `backend/workflow.py`
+- [x] Implement `clone_repo_node`, `log_analysis_node`, `file_identification_node`, `change_inspection_node` as thin wrappers
+- [x] Wire `clone_repo` → fan-out to both `log_analysis` and `file_identification` using LangGraph `Send`
+- [x] Wire fan-in from both parallel nodes into `change_inspection`
+- [x] Implement per-run `asyncio.Queue` event bus and `record_agent_step` helper
+- [x] Write `tests/test_workflow.py`
+- [ ] Implement `hypothesis_node`, `patch_node`, `apply_patch_node`, `test_runner_node`, `report_node`
 - [ ] Implement approval interrupt using LangGraph `MemorySaver` checkpoint
-- [ ] Implement `resume_workflow(run_id, approved: bool)` in `workflow_service.py`
-- [ ] Implement per-run `asyncio.Queue` event bus
+- [ ] Implement `resume_workflow(run_id, approved: bool)`
 - [ ] Add conditional edge for iteration loop
-- [ ] Write `tests/test_workflow.py`
 
-**Status:** [ ] pending
+**Status:** [-] in progress
+
+**Implemented so far:** `backend/workflow.py` exists with `WorkflowState`, event queue infrastructure, `record_agent_step`, and a partial `StateGraph` covering clone → parallel analysis fan-out → change_inspection. The analysis phase (4 nodes) is complete. Hypothesis, patch, apply, test, and report nodes are not yet wired.
 
 ---
 
@@ -737,7 +753,7 @@ can run the demo in under 5 minutes.
 
 **Todo:**
 - [ ] Run `pytest tests/` — fix any failures
-- [ ] Run full end-to-end demo with real watsonx.ai credentials
+- [ ] Run full end-to-end demo with local Ollama (`qwen2.5-coder:1.5b`)
 - [ ] Verify ResolutionReport names "rename refactor" + `pricing.py` formula as root cause
 - [ ] Verify both `test_payment_no_coupon` and `test_payment_with_coupon` pass after patch
 - [ ] Fix any integration issues
