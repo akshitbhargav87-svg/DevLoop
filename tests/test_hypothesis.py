@@ -48,6 +48,15 @@ def test_generate_hypothesis_synthesizes_evidence():
             RELEVANT_FILES,
             RECENT_CHANGES,
             previous_failures=["Expected 75.0, got 25.0"],
+            bug_report={
+                "description": "calculate_discount(100, 0.25) returns 25 but should return 75.",
+                "stack_trace": "assert result == 75\\nE assert 25 == 75",
+                "test_command": "pytest -q",
+            },
+            file_contents={
+                "pricing.py": "return total * coupon_rate",
+                "test_pricing.py": "assert calculate_discount(100, 0.25) == 75",
+            },
         )
 
     assert result == {
@@ -60,6 +69,9 @@ def test_generate_hypothesis_synthesizes_evidence():
     assert "Expected 75.0, got 25.0" in prompt
     assert "refactor: rename apply_coupon to calculate_discount" in prompt
     assert "store/pricing.py" in prompt
+    assert "returns 25 but should return 75" in prompt
+    assert "E assert 25 == 75" in prompt
+    assert "assert calculate_discount(100, 0.25) == 75" in prompt
 
 
 def test_generate_hypothesis_filters_unsupported_affected_files():

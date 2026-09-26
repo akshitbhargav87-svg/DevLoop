@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from pathlib import Path
+from typing import Any, Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import StreamingResponse
+from git import Repo
+from git.exc import InvalidGitRepositoryError, NoSuchPathError
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 if __package__ and __package__.startswith("backend."):
-    from backend.database import SessionLocal, get_db
-    from backend.models import AgentStep, BugReport, WorkflowRun
-    from backend.workflow import get_event_queue, resume_workflow, run_workflow, stream_run_events
+    from database import SessionLocal, get_db
+    from models import AgentStep, BugReport, WorkflowRun
+    from workflow import get_event_queue, resume_workflow, run_workflow, stream_run_events
 else:  # Support the documented `cd backend; uvicorn main:app` launch.
     from database import SessionLocal, get_db
     from models import AgentStep, BugReport, WorkflowRun
@@ -28,7 +31,9 @@ class BugReportCreate(BaseModel):
     description: str
     stack_trace: str | None = None
     repo_url: str
+    repository_type: Literal["local", "git"] = "git"
     branch: str = "main"
+    test_command: str | None = None
 
 
 class ApprovalRequest(BaseModel):
@@ -62,7 +67,28 @@ async def create_run(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ) -> dict[str, str]:
-    bug_report = BugReport(**request.model_dump())
+    repository = request.repo_url.strip()
+    if not repository:
+        raise HTTPException(status_code=422, detail="Repository path or Git URL is required")
+    if request.repository_type == "local":
+        try:
+            local_path = Path(repository).expanduser().resolve(strict=True)
+            if not local_path.is_dir():
+                raise HTTPException(status_code=422, detail="Local repository must be a folder")
+            local_repo = Repo(str(local_path), search_parent_directories=False)
+            if local_repo.working_tree_dir is None:
+                raise HTTPException(status_code=422, detail="Local path must be a Git working tree")
+            repository = str(local_path)
+        except (InvalidGitRepositoryError, NoSuchPathError, OSError):
+            raise HTTPException(status_code=422, detail="Local path must be an existing Git repository")
+
+    bug_report = BugReport(
+        title=request.title,
+        description=request.description,
+        stack_trace=request.stack_trace,
+        repo_url=repository,
+        branch=request.branch.strip() or "main",
+    )
     db.add(bug_report)
     db.flush()
     run = WorkflowRun(bug_report_id=bug_report.id, status="pending")
@@ -79,6 +105,7 @@ async def create_run(
         "stack_trace": bug_report.stack_trace,
         "repo_url": bug_report.repo_url,
         "branch": bug_report.branch,
+        "test_command": request.test_command.strip() if request.test_command else None,
     }
     background_tasks.add_task(run_workflow, run.id, workflow_input, SessionLocal)
     return {"run_id": run.id}

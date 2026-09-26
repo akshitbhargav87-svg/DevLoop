@@ -11,8 +11,8 @@ from typing import Any, Callable, TypedDict
 
 from sqlalchemy.orm import Session
 
-from backend.models.agent_step import AgentStep
-from backend.models.workflow_run import WorkflowRun
+from models.agent_step import AgentStep
+from models.workflow_run import WorkflowRun
 
 
 class WorkflowState(TypedDict, total=False):
@@ -172,6 +172,35 @@ def _changed_paths(diff: str) -> list[str]:
     return paths
 
 
+def _workspace_log_evidence(result: dict[str, Any], available_files: set[str]) -> dict[str, Any]:
+    """Discard log-analysis locations that cannot exist in this repository."""
+    module = result.get("module")
+    if not isinstance(module, str) or module not in available_files:
+        return {"exception": "Unknown", "module": "", "line": 0, "call_chain": []}
+    call_chain = result.get("call_chain", [])
+    if isinstance(call_chain, list):
+        for entry in call_chain:
+            if isinstance(entry, str) and ("/" in entry or "\\" in entry):
+                referenced = entry.replace("\\", "/").split(":", 1)[0]
+                if referenced not in available_files:
+                    return {"exception": "Unknown", "module": "", "line": 0, "call_chain": []}
+    return result
+
+
+def _workspace_file_evidence(result: dict[str, Any], available_files: set[str]) -> dict[str, Any]:
+    """Keep only file-identification candidates present in this clone."""
+    candidates = result.get("files", [])
+    if not isinstance(candidates, list):
+        return {"files": []}
+    files = [
+        item for item in candidates
+        if isinstance(item, dict)
+        and isinstance(item.get("path"), str)
+        and item["path"] in available_files
+    ]
+    return {"files": files}
+
+
 def _set_run_status(
     session_factory: SessionFactory,
     run_id: str,
@@ -247,7 +276,7 @@ def build_workflow(
     from langgraph.types import Send, interrupt
 
     def clone_repo_node(state: WorkflowState) -> dict[str, Any]:
-        from backend.tools.repo_tools import clone_repo
+        from tools.repo_tools import clone_repo
 
         bug_report = state["bug_report"]
         workspace = record_agent_step(
@@ -270,29 +299,39 @@ def build_workflow(
         return {"workspace_dir": workspace}
 
     def log_analysis_node(state: WorkflowState) -> dict[str, Any]:
-        from backend.agents.log_analysis import analyze_log
+        from agents.log_analysis import analyze_log
+        from tools.repo_tools import list_files
 
         bug_report = state["bug_report"]
+        def analyze() -> dict[str, Any]:
+            result = analyze_log(
+                bug_report.get("stack_trace") or "",
+                bug_report.get("description", ""),
+            )
+            # Log analysis is model supplied. A module absent from this clone is
+            # stale or invented evidence and must not enter downstream prompts.
+            available = set(list_files(state["workspace_dir"]).splitlines())
+            return _workspace_log_evidence(result, available)
+
         result = record_agent_step(
             session_factory,
             state["run_id"],
             "log_analysis",
-            lambda: analyze_log(
-                bug_report.get("stack_trace") or "",
-                bug_report.get("description", ""),
-            ),
+            analyze,
         )
         return {"log_analysis": result}
 
     def file_identification_node(state: WorkflowState) -> dict[str, Any]:
-        from backend.agents.file_identification import identify_files
-        from backend.tools.repo_tools import list_files
+        from agents.file_identification import identify_files
+        from tools.repo_tools import list_files
 
         bug_report = state["bug_report"]
 
         def identify() -> dict[str, Any]:
             file_listing = list_files(state["workspace_dir"])
-            return identify_files(bug_report.get("stack_trace") or "", file_listing)
+            available = set(file_listing.splitlines())
+            result = identify_files(bug_report.get("stack_trace") or "", file_listing)
+            return _workspace_file_evidence(result, available)
 
         result = record_agent_step(
             session_factory,
@@ -303,7 +342,7 @@ def build_workflow(
         return {"relevant_files": result}
 
     def change_inspection_node(state: WorkflowState) -> dict[str, Any]:
-        from backend.tools.git_tools import recent_commits, show_commit_diff
+        from tools.git_tools import recent_commits, show_commit_diff
 
         relevant_items = state.get("relevant_files", {}).get("files", [])
         relevant_paths = {
@@ -331,7 +370,18 @@ def build_workflow(
         return {"recent_changes": result}
 
     def hypothesis_node(state: WorkflowState) -> dict[str, Any]:
-        from backend.agents.hypothesis import generate_hypothesis
+        from agents.hypothesis import generate_hypothesis
+        from tools.repo_tools import read_file
+
+        paths = [
+            item["path"]
+            for item in state.get("relevant_files", {}).get("files", [])[:5]
+            if isinstance(item, dict) and isinstance(item.get("path"), str)
+        ]
+        file_contents = {
+            path: read_file(state["workspace_dir"], path)[:12000]
+            for path in paths
+        }
 
         result = record_agent_step(
             session_factory,
@@ -342,13 +392,16 @@ def build_workflow(
                 state.get("relevant_files", {}),
                 state.get("recent_changes", {}),
                 state.get("previous_failures", []),
+                state.get("bug_report", {}),
+                file_contents,
             ),
         )
         return {"hypothesis": result}
 
     def patch_node(state: WorkflowState) -> dict[str, Any]:
-        from backend.agents.patch import generate_patch
-        from backend.tools.repo_tools import read_file
+        from agents.patch import generate_patch
+        from tools.repo_tools import list_files, read_file
+        from tools.test_tools import validate_patch
 
         hypothesis = state.get("hypothesis", {})
 
@@ -358,10 +411,57 @@ def build_workflow(
                 for path in hypothesis.get("affected_files", [])
                 if isinstance(path, str)
             }
-            return generate_patch(
-                hypothesis,
-                file_contents,
-                state.get("previous_failures", []),
+            previous_failures = list(state.get("previous_failures", []))
+            test_command = state.get("bug_report", {}).get("test_command")
+
+            for attempt in range(2):
+                result = generate_patch(
+                    hypothesis,
+                    file_contents,
+                    previous_failures,
+                    state.get("bug_report", {}),
+                )
+                declared = result.get("files_changed", [])
+                available = set(list_files(state["workspace_dir"]).splitlines())
+                invalid_declarations = (
+                    not isinstance(declared, list)
+                    or not declared
+                    or any(not isinstance(path, str) or path not in available for path in declared)
+                )
+                if invalid_declarations:
+                    validation = {
+                        "passed": False,
+                        "error": "Candidate patch declares no changed files or targets a file absent from the isolated workspace.",
+                    }
+                else:
+                    validation = validate_patch(
+                        state["workspace_dir"],
+                        result.get("patch", ""),
+                        test_command,
+                        expected_files=declared,
+                    )
+                if validation.get("passed"):
+                    result["preapproval_validation"] = validation
+                    return result
+
+                test_results = validation.get("test_results", {})
+                failure_details = (
+                    test_results.get("output_excerpt", "")
+                    if isinstance(test_results, dict)
+                    else ""
+                )
+                failure_details = failure_details or validation.get(
+                    "error",
+                    "The candidate patch did not pass its test run.",
+                )
+                previous_failures.append(
+                    f"Pre-approval patch validation attempt {attempt + 1} failed:\n"
+                    f"{failure_details}"
+                )
+
+            raise RuntimeError(
+                "Generated patch did not pass pre-approval tests after two attempts. "
+                f"{previous_failures[-1]}"
             )
 
         result = record_agent_step(
@@ -403,7 +503,7 @@ def build_workflow(
         return {"patch_approved": approved}
 
     def apply_patch_node(state: WorkflowState) -> dict[str, Any]:
-        from backend.tools.test_tools import apply_patch
+        from tools.test_tools import apply_patch
 
         applied = record_agent_step(
             session_factory,
@@ -419,10 +519,14 @@ def build_workflow(
         return {"patch_applied": bool(applied)}
 
     def test_runner_node(state: WorkflowState) -> dict[str, Any]:
-        from backend.tools.test_tools import run_pytest
+        from tools.test_tools import run_pytest
 
         def run_tests() -> dict[str, Any]:
-            result = run_pytest(state["workspace_dir"])
+            test_command = state.get("bug_report", {}).get("test_command")
+            if test_command:
+                result = run_pytest(state["workspace_dir"], test_command)
+            else:
+                result = run_pytest(state["workspace_dir"])
             if not state.get("patch_applied", False):
                 result = {
                     **result,
@@ -464,8 +568,8 @@ def build_workflow(
         return {"previous_failures": previous_failures, "iteration": iteration}
 
     def report_node(state: WorkflowState) -> dict[str, Any]:
-        from backend.agents.report import generate_report
-        from backend.models.resolution_report import ResolutionReport
+        from agents.report import generate_report
+        from models.resolution_report import ResolutionReport
 
         test_result = state.get(
             "test_output",
@@ -608,7 +712,18 @@ def resume_workflow(
     graph = build_workflow(session_factory, checkpointer=checkpointer)
     config = {"configurable": {"thread_id": run_id}}
     try:
-        return graph.invoke(Command(resume=approved), config=config)
+        checkpoint = graph.get_state(config)
+        print("=== RESUME DEBUG ===")
+        print("run_id:", run_id)
+        print("approved:", approved)
+        print("next:", checkpoint.next)
+        print("tasks:", checkpoint.tasks)
+        print("====================")
+        result = graph.invoke(Command(resume=approved), config=config)
+        print("=== RESUME RESULT ===")
+        print(result)
+        print("====================")
+        return result
     except Exception as exc:
         _set_run_status(session_factory, run_id, "failed")
         publish_event(run_id, {"type": "run_failed", "error": str(exc)})

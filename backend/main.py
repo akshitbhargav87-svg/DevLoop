@@ -2,9 +2,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 if __package__ == "backend":
-    from backend.database import Base, engine
-    from backend.routers.reports import router as reports_router
-    from backend.routers.runs import router as runs_router
+    from database import Base, engine
+    from routers.reports import router as reports_router
+    from routers.runs import router as runs_router
 else:  # Support the documented `cd backend; uvicorn main:app` launch.
     from database import Base, engine
     from routers.reports import router as reports_router

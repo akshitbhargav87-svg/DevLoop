@@ -5,7 +5,7 @@ from sqlalchemy import ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 if __package__ and __package__.startswith("backend."):
-    from backend.database import Base
+    from database import Base
 else:
     from database import Base
 

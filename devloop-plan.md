@@ -1,4 +1,4 @@
-# DevLoop — Technical Plan (v3, Final)
+# DevLoop â€” Technical Plan (v3, Final)
 
 ## Top-Level Overview
 
@@ -14,7 +14,7 @@ tests fail. A final resolution report is produced.
 
 **Stack:**
 - Backend: Python 3.11, FastAPI, LangGraph, `langchain-ollama`
-- LLM: Ollama (local) — `qwen2.5-coder:1.5b` via `ChatOllama`
+- LLM: Ollama (local) â€” `qwen2.5-coder:1.5b` via `ChatOllama`
 - Frontend: React 18, TypeScript, Vite, Tailwind CSS
 - Repo inspection: `gitpython`, `subprocess` (pytest)
 - Storage: SQLite via synchronous SQLAlchemy (no migration tooling needed)
@@ -37,38 +37,38 @@ and extensive tests are secondary.
 
 ```
 Browser (React / TypeScript)
-  │
-  │  POST /api/runs                   submit bug report → start workflow
-  │  GET  /api/runs/{id}/events       SSE stream of AgentStepEvents
-  │  GET  /api/runs/{id}              current run state + all steps
-  │  POST /api/runs/{id}/approve      developer approves or rejects patch
-  │  GET  /api/reports/{run_id}       final resolution report
-  │
-  ▼
+  â”‚
+  â”‚  POST /api/runs                   submit bug report â†’ start workflow
+  â”‚  GET  /api/runs/{id}/events       SSE stream of AgentStepEvents
+  â”‚  GET  /api/runs/{id}              current run state + all steps
+  â”‚  POST /api/runs/{id}/approve      developer approves or rejects patch
+  â”‚  GET  /api/reports/{run_id}       final resolution report
+  â”‚
+  â–¼
 FastAPI  (backend/)
-  └── WorkflowService
-        └── LangGraph StateGraph
-              ├── clone_repo_node
-              ├── ┌─────────────────────────────┐  (parallel fan-out)
-              │   │ log_analysis_node            │
-              │   │ file_identification_node     │
-              │   └─────────────────────────────┘
-              ├── change_inspection_node          (fan-in: receives both outputs)
-              ├── hypothesis_node
-              ├── patch_node
-              ├── ── PAUSE: awaiting_approval ──  (human gate)
-              ├── apply_patch_node                (local only — no remote push)
-              ├── test_runner_node
-              └── report_node
-                    ↑ (loop to hypothesis_node on failure, max 3 iterations)
+  â””â”€â”€ WorkflowService
+        â””â”€â”€ LangGraph StateGraph
+              â”œâ”€â”€ clone_repo_node
+              â”œâ”€â”€ â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”  (parallel fan-out)
+              â”‚   â”‚ log_analysis_node            â”‚
+              â”‚   â”‚ file_identification_node     â”‚
+              â”‚   â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+              â”œâ”€â”€ change_inspection_node          (fan-in: receives both outputs)
+              â”œâ”€â”€ hypothesis_node
+              â”œâ”€â”€ patch_node
+              â”œâ”€â”€ â”€â”€ PAUSE: awaiting_approval â”€â”€  (human gate)
+              â”œâ”€â”€ apply_patch_node                (local only â€” no remote push)
+              â”œâ”€â”€ test_runner_node
+              â””â”€â”€ report_node
+                    â†‘ (loop to hypothesis_node on failure, max 3 iterations)
 ```
 
 ### Approval gate
 After `patch_node` completes, the graph suspends via a LangGraph interrupt.
 The run `status` is set to `awaiting_approval` in the DB. Resumption happens
 only when the developer calls `POST /api/runs/{id}/approve`:
-- `{"approved": true}` → graph resumes at `apply_patch_node`
-- `{"approved": false}` → graph skips to `report_node` with `patch_approved = false`
+- `{"approved": true}` â†’ graph resumes at `apply_patch_node`
+- `{"approved": false}` â†’ graph skips to `report_node` with `patch_approved = false`
 
 The patch is applied **only** in the isolated temporary workspace. The tool
 layer has no `git push` capability.
@@ -94,7 +94,7 @@ Tables are created via `Base.metadata.create_all()` on app startup.
 | Field | Type | Notes |
 |---|---|---|
 | id | TEXT PK | UUID |
-| bug_report_id | TEXT FK | → BugReport |
+| bug_report_id | TEXT FK | â†’ BugReport |
 | status | TEXT | `pending \| running \| awaiting_approval \| approved \| rejected \| completed \| failed` |
 | workspace_dir | TEXT | absolute path to temp clone |
 | iteration | INT | default 0 |
@@ -105,10 +105,10 @@ Tables are created via `Base.metadata.create_all()` on app startup.
 | Field | Type | Notes |
 |---|---|---|
 | id | TEXT PK | UUID |
-| run_id | TEXT FK | → WorkflowRun |
+| run_id | TEXT FK | â†’ WorkflowRun |
 | step_name | TEXT | |
 | status | TEXT | `pending \| running \| completed \| failed` |
-| evidence | TEXT | JSON — structured evidence object (not raw LLM output) |
+| evidence | TEXT | JSON â€” structured evidence object (not raw LLM output) |
 | started_at | TEXT | |
 | completed_at | TEXT | nullable |
 
@@ -128,7 +128,7 @@ Tables are created via `Base.metadata.create_all()` on app startup.
 | Field | Type | Notes |
 |---|---|---|
 | id | TEXT PK | UUID |
-| run_id | TEXT FK | → WorkflowRun |
+| run_id | TEXT FK | â†’ WorkflowRun |
 | root_cause | TEXT | |
 | evidence | TEXT | JSON list |
 | changes_made | TEXT | JSON list of unified diffs |
@@ -139,7 +139,7 @@ Tables are created via `Base.metadata.create_all()` on app startup.
 
 ---
 
-## Agent Workflow — LangGraph StateGraph
+## Agent Workflow â€” LangGraph StateGraph
 
 ### Shared State
 ```python
@@ -161,7 +161,7 @@ class WorkflowState(TypedDict):
 
 ### Parallel Architecture
 
-`log_analysis_node` and `file_identification_node` are **independent** —
+`log_analysis_node` and `file_identification_node` are **independent** â€”
 neither depends on the other's output. Both receive only:
 - The bug report (title, description, stack trace)
 - The repository workspace (available after `clone_repo_node`)
@@ -180,24 +180,24 @@ the exception/line info from `log_analysis` to focus the summary.
 
 | Node | Type | Parallel? | Responsibility |
 |---|---|---|---|
-| `clone_repo` | Tool | — | Clone repo into temp dir; populate `workspace_dir` |
-| `log_analysis` | LLM sub-agent | ✓ with `file_id` | Parse stack trace → structured exception evidence |
-| `file_identification` | LLM sub-agent | ✓ with `log_analysis` | Inspect repo tree → ranked file list |
-| `change_inspection` | Tool + LLM | — (fan-in) | `git log` + diffs on relevant files; summarise |
-| `hypothesis` | LLM orchestrator | — | Synthesise all evidence → root-cause + fix strategy |
-| `patch` | LLM sub-agent | — | Read source files → produce unified diff |
-| `awaiting_approval` | Human gate | — | Suspend; wait for `POST /approve` |
-| `apply_patch` | Tool | — | Apply diff locally; no `git push` |
-| `test_runner` | Tool | — | Run `pytest`; return structured results |
-| `report` | LLM sub-agent | — | Assemble final ResolutionReport |
+| `clone_repo` | Tool | â€” | Clone repo into temp dir; populate `workspace_dir` |
+| `log_analysis` | LLM sub-agent | âœ“ with `file_id` | Parse stack trace â†’ structured exception evidence |
+| `file_identification` | LLM sub-agent | âœ“ with `log_analysis` | Inspect repo tree â†’ ranked file list |
+| `change_inspection` | Tool + LLM | â€” (fan-in) | `git log` + diffs on relevant files; summarise |
+| `hypothesis` | LLM orchestrator | â€” | Synthesise all evidence â†’ root-cause + fix strategy |
+| `patch` | LLM sub-agent | â€” | Read source files â†’ produce unified diff |
+| `awaiting_approval` | Human gate | â€” | Suspend; wait for `POST /approve` |
+| `apply_patch` | Tool | â€” | Apply diff locally; no `git push` |
+| `test_runner` | Tool | â€” | Run `pytest`; return structured results |
+| `report` | LLM sub-agent | â€” | Assemble final ResolutionReport |
 
 ### Iteration loop
 ```
-test_runner → test_passed?
-  YES → report  (workflow complete)
-  NO  → iteration < 3?
-          YES → append failure to previous_failures → hypothesis (re-analyse)
-          NO  → report  (workflow complete, unresolved)
+test_runner â†’ test_passed?
+  YES â†’ report  (workflow complete)
+  NO  â†’ iteration < 3?
+          YES â†’ append failure to previous_failures â†’ hypothesis (re-analyse)
+          NO  â†’ report  (workflow complete, unresolved)
 ```
 
 ### SSE events emitted
@@ -251,10 +251,10 @@ the discounted total.
 
 | | Value |
 |---|---|
-| Order total | £100 |
+| Order total | Â£100 |
 | Coupon rate | 0.25 (25%) |
-| Expected charge | £75.00 |
-| Actual (buggy) charge | £25.00 |
+| Expected charge | Â£75.00 |
+| Actual (buggy) charge | Â£25.00 |
 
 The existing test asserts `amount == 75.0` and **fails before DevLoop runs**.
 DevLoop does **not** create any tests. After the patch is approved and applied,
@@ -262,7 +262,7 @@ the existing test passes.
 
 ### Synthetic repo: `demo-target/`
 
-**`store/pricing.py`** (buggy state — as it exists when DevLoop clones it)
+**`store/pricing.py`** (buggy state â€” as it exists when DevLoop clones it)
 ```python
 def calculate_discount(order_total: float, coupon_rate: float) -> float:
     """Return the discounted price for an order."""
@@ -280,7 +280,7 @@ def process_payment(order_total: float, coupon_rate: float = 0.0) -> dict:
 ```
 
 **`tests/test_checkout.py`** (committed before DevLoop runs; asserts the
-correct £75 result — this test FAILS against the buggy code)
+correct Â£75 result â€” this test FAILS against the buggy code)
 ```python
 from store.checkout import process_payment
 
@@ -297,23 +297,23 @@ def test_payment_no_coupon():
 
 | # | Message | Change |
 |---|---|---|
-| 1 | `init: add pricing and checkout modules` | `apply_coupon()` returns `total * (1 - rate)` — correct |
-| 2 | `refactor: rename apply_coupon to calculate_discount` | Formula accidentally changed to `total * rate` — **introduces bug** |
-| 3 | `test: add checkout tests` | Adds `tests/test_checkout.py` asserting `amount == 75.0` — test fails |
+| 1 | `init: add pricing and checkout modules` | `apply_coupon()` returns `total * (1 - rate)` â€” correct |
+| 2 | `refactor: rename apply_coupon to calculate_discount` | Formula accidentally changed to `total * rate` â€” **introduces bug** |
+| 3 | `test: add checkout tests` | Adds `tests/test_checkout.py` asserting `amount == 75.0` â€” test fails |
 
 ### Expected agent trace
 
-1. **LogAnalysisAgent** (parallel) — identifies no exception is thrown;
+1. **LogAnalysisAgent** (parallel) â€” identifies no exception is thrown;
    identifies wrong numeric result; points to `pricing.py:3` and `checkout.py:5`
-2. **FileIdentificationAgent** (parallel) — ranks `pricing.py` > `checkout.py` > `tests/test_checkout.py`
-3. **ChangeInspection** — finds commit 2 "refactor: rename apply_coupon to
+2. **FileIdentificationAgent** (parallel) â€” ranks `pricing.py` > `checkout.py` > `tests/test_checkout.py`
+3. **ChangeInspection** â€” finds commit 2 "refactor: rename apply_coupon to
    calculate_discount"; diff shows formula change from `total * (1 - rate)` to `total * rate`
-4. **HypothesisAgent** — root cause: rename refactor dropped `(1 - ...)` wrapper;
+4. **HypothesisAgent** â€” root cause: rename refactor dropped `(1 - ...)` wrapper;
    fix strategy: restore `order_total * (1 - coupon_rate)` in `pricing.py`
-5. **PatchAgent** — diff changes line 3 of `pricing.py` only
-6. **ApprovalGate** — developer reviews one-line diff in the UI; clicks Approve
-7. **TestRunner** — both existing tests pass (`test_payment_with_coupon` now returns 75.0)
-8. **ReportAgent** — structured report: root cause, evidence from commit 2, diff, test results
+5. **PatchAgent** â€” diff changes line 3 of `pricing.py` only
+6. **ApprovalGate** â€” developer reviews one-line diff in the UI; clicks Approve
+7. **TestRunner** â€” both existing tests pass (`test_payment_with_coupon` now returns 75.0)
+8. **ReportAgent** â€” structured report: root cause, evidence from commit 2, diff, test results
 
 ### The correct patch (expected output)
 ```diff
@@ -328,7 +328,7 @@ def test_payment_no_coupon():
 
 ### Pre-filled bug report (Load Demo)
 - **Title:** `process_payment charges wrong amount when coupon is applied`
-- **Description:** `When a 25% coupon is applied to a £100 order the customer is charged £25 instead of £75. The checkout test asserts 75.0 but receives 25.0.`
+- **Description:** `When a 25% coupon is applied to a Â£100 order the customer is charged Â£25 instead of Â£75. The checkout test asserts 75.0 but receives 25.0.`
 - **Stack trace:**
 ```
 FAILED tests/test_checkout.py::test_payment_with_coupon
@@ -348,31 +348,31 @@ AssertionError: Expected 75.0, got 25.0
 ## Frontend
 
 ### Views
-1. **Submit** (`/`) — Bug report form + "Load Demo" button
-2. **Run Detail** (`/runs/:id`) — Live workflow view
-3. **Report** (`/runs/:id/report`) — Final resolution report
+1. **Submit** (`/`) â€” Bug report form + "Load Demo" button
+2. **Run Detail** (`/runs/:id`) â€” Live workflow view
+3. **Report** (`/runs/:id/report`) â€” Final resolution report
 
 ### Run Detail layout
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  Bug: "process_payment charges wrong amount..."             │
-│  Status badge   Repo   Branch                               │
-├────────────────────────┬────────────────────────────────────┤
-│  STEP TIMELINE         │  DETAIL PANEL                      │
-│                        │                                    │
-│  ✓ Clone repo          │  [Selected step EvidenceCard]      │
-│  ✓ Log analysis   ─┐   │                                    │
-│  ✓ File ID        ─┘   │  Evidence rendered as labelled     │
-│  ✓ Change inspect      │  key-value cards — no raw LLM text │
-│  ✓ Hypothesis          │                                    │
-│  ✓ Patch               │  ┌──────────────────────────────┐  │
-│  ⏸ Awaiting approval  │  │  PATCH APPROVAL PANEL        │  │
-│    Apply patch         │  │  One-line description        │  │
-│    Test runner         │  │  Syntax-highlighted diff     │  │
-│    Report              │  │  [Approve]  [Reject]         │  │
-│                        │  └──────────────────────────────┘  │
-└────────────────────────┴────────────────────────────────────┘
+â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”‚  Bug: "process_payment charges wrong amount..."             â”‚
+â”‚  Status badge   Repo   Branch                               â”‚
+â”œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¤
+â”‚  STEP TIMELINE         â”‚  DETAIL PANEL                      â”‚
+â”‚                        â”‚                                    â”‚
+â”‚  âœ“ Clone repo          â”‚  [Selected step EvidenceCard]      â”‚
+â”‚  âœ“ Log analysis   â”€â”   â”‚                                    â”‚
+â”‚  âœ“ File ID        â”€â”˜   â”‚  Evidence rendered as labelled     â”‚
+â”‚  âœ“ Change inspect      â”‚  key-value cards â€” no raw LLM text â”‚
+â”‚  âœ“ Hypothesis          â”‚                                    â”‚
+â”‚  âœ“ Patch               â”‚  â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”  â”‚
+â”‚  â¸ Awaiting approval  â”‚  â”‚  PATCH APPROVAL PANEL        â”‚  â”‚
+â”‚    Apply patch         â”‚  â”‚  One-line description        â”‚  â”‚
+â”‚    Test runner         â”‚  â”‚  Syntax-highlighted diff     â”‚  â”‚
+â”‚    Report              â”‚  â”‚  [Approve]  [Reject]         â”‚  â”‚
+â”‚                        â”‚  â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜  â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”´â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
 ```
 
 `log_analysis` and `file_identification` are shown as a parallel pair in the
@@ -404,13 +404,13 @@ for the hackathon. Unit tests cover only the tools layer and a smoke test
 for the workflow state machine.
 
 ### Backend (`pytest tests/`)
-- `tests/test_tools.py` — repo, git, and test tools against the local `demo-target` fixture
-- `tests/test_workflow.py` — full LangGraph state machine with all LLM nodes
+- `tests/test_tools.py` â€” repo, git, and test tools against the local `demo-target` fixture
+- `tests/test_workflow.py` â€” full LangGraph state machine with all LLM nodes
   mocked; verify parallel fan-out, approval gate, and iteration loop
 
 ### Frontend (`vitest` + `@testing-library/react`)
-- `BugReportForm` — renders, pre-fills on "Load Demo", submits
-- `PatchApprovalPanel` — visible only when status is `awaiting_approval`
+- `BugReportForm` â€” renders, pre-fills on "Load Demo", submits
+- `PatchApprovalPanel` â€” visible only when status is `awaiting_approval`
 
 ### Integration (manual)
 - End-to-end run against `demo-target` with local Ollama (`qwen2.5-coder:1.5b`)
@@ -461,7 +461,7 @@ DevLoop/
       checkout.py
     tests/
       __init__.py
-      test_checkout.py              asserts 75.0 — fails before patch
+      test_checkout.py              asserts 75.0 â€” fails before patch
     README.md
   backend/
     main.py                         FastAPI app, CORS, startup
@@ -532,7 +532,7 @@ DevLoop/
 
 ## Sub-Tasks
 
-### ST-01 — Demo target repository
+### ST-01 â€” Demo target repository
 **Intent:** Create the synthetic order/payment Python project with a fixed
 3-commit history. The existing test asserts the correct result (75.0) and
 must fail against the buggy code before DevLoop runs, then pass after the
@@ -561,7 +561,7 @@ not create or modify tests during the workflow. The patch touches only `pricing.
 
 ---
 
-### ST-02 — Backend skeleton
+### ST-02 â€” Backend skeleton
 **Intent:** Stand up FastAPI, SQLite, and config so subsequent sub-tasks have
 a running server.
 
@@ -573,8 +573,8 @@ a running server.
 **Todo:**
 - [ ] Create `backend/config.py` (Pydantic `BaseSettings`)
 - [ ] Create `backend/database.py` (sync SQLAlchemy engine, `Base`, `get_db`)
-- [ ] Create `backend/models/` — four model files matching the data model section
-- [ ] Create `backend/main.py` — app factory, CORS, `/health`, `create_all()` on startup
+- [ ] Create `backend/models/` â€” four model files matching the data model section
+- [ ] Create `backend/main.py` â€” app factory, CORS, `/health`, `create_all()` on startup
 - [ ] Write `backend/requirements.txt`: fastapi, uvicorn, sqlalchemy, pydantic-settings, gitpython, langchain-ollama, langgraph, python-dotenv, sse-starlette, pytest
 
 **Status:** [x] completed
@@ -583,19 +583,19 @@ a running server.
 
 ---
 
-### ST-03 — Backend tools layer
+### ST-03 â€” Backend tools layer
 **Intent:** Implement all deterministic tool functions (no LLM) used by agent
 nodes. These are the lowest-level primitives; all other backend work builds on them.
 
 **Expected outcomes:**
-- `clone_repo(url, branch)` → temp dir path
-- `list_files(workspace)` → recursive file listing string
-- `read_file(workspace, rel_path)` → file content
-- `grep_symbol(workspace, symbol)` → list of `{file, line, text}`
-- `recent_commits(workspace, n)` → list of `{sha, message, author, date}`
-- `show_commit_diff(workspace, sha)` → unified diff string
-- `apply_patch(workspace, diff_str)` → success bool; no `git push`
-- `run_pytest(workspace)` → `{passed, failed, errors[], output_excerpt}`
+- `clone_repo(url, branch)` â†’ temp dir path
+- `list_files(workspace)` â†’ recursive file listing string
+- `read_file(workspace, rel_path)` â†’ file content
+- `grep_symbol(workspace, symbol)` â†’ list of `{file, line, text}`
+- `recent_commits(workspace, n)` â†’ list of `{sha, message, author, date}`
+- `show_commit_diff(workspace, sha)` â†’ unified diff string
+- `apply_patch(workspace, diff_str)` â†’ success bool; no `git push`
+- `run_pytest(workspace)` â†’ `{passed, failed, errors[], output_excerpt}`
 - `tests/test_tools.py` passes using `demo-target` as fixture
 
 **Todo:**
@@ -610,18 +610,18 @@ nodes. These are the lowest-level primitives; all other backend work builds on t
 
 ---
 
-### ST-04 — Ollama LLM client and sub-agents
+### ST-04 â€” Ollama LLM client and sub-agents
 **Intent:** Implement the `ChatOllama` factory and all five LLM sub-agents.
-Each agent returns only structured evidence — no raw LLM text — and is callable
+Each agent returns only structured evidence â€” no raw LLM text â€” and is callable
 as a standalone function for easy testing and mocking.
 
 **Expected outcomes:**
 - `llm_client.py` builds `ChatOllama` from config (`qwen2.5-coder:1.5b`)
-- `log_analysis.py` — input: `stack_trace + description`; output: `{exception, module, line, call_chain[]}`
-- `file_identification.py` — input: `stack_trace + list_files output`; output: `{files: [{path, relevance_reason, rank}]}`; **no dependency on log_analysis output**
-- `hypothesis.py` — input: all prior evidence + `previous_failures`; output: `{root_cause, affected_files[], fix_strategy, confidence}`
-- `patch.py` — input: hypothesis + file contents; output: `{patch, files_changed[], explanation}`
-- `report_agent.py` — input: full state; output: ResolutionReport fields
+- `log_analysis.py` â€” input: `stack_trace + description`; output: `{exception, module, line, call_chain[]}`
+- `file_identification.py` â€” input: `stack_trace + list_files output`; output: `{files: [{path, relevance_reason, rank}]}`; **no dependency on log_analysis output**
+- `hypothesis.py` â€” input: all prior evidence + `previous_failures`; output: `{root_cause, affected_files[], fix_strategy, confidence}`
+- `patch.py` â€” input: hypothesis + file contents; output: `{patch, files_changed[], explanation}`
+- `report_agent.py` â€” input: full state; output: ResolutionReport fields
 - All agents enforce JSON-only output via prompt; fall back gracefully on malformed LLM responses
 
 **Todo:**
@@ -642,7 +642,7 @@ ST-01 through ST-04 are now implemented. The full pytest suite was also run with
 
 The next target is ST-05: LangGraph orchestration, genuine parallel analysis, approval gate, patch application, test iteration, event streaming, and final report integration.
 
-### ST-05 — LangGraph orchestrator with approval gate
+### ST-05 â€” LangGraph orchestrator with approval gate
 **Intent:** Wire all nodes into a LangGraph `StateGraph` with genuine parallel
 fan-out for `log_analysis` and `file_identification`, the human-in-the-loop
 approval interrupt, and the iteration loop. Each node emits SSE events.
@@ -660,7 +660,7 @@ approval interrupt, and the iteration loop. Each node emits SSE events.
 **Todo:**
 - [x] Define `WorkflowState` TypedDict in `backend/workflow.py`
 - [x] Implement `clone_repo_node`, `log_analysis_node`, `file_identification_node`, `change_inspection_node` as thin wrappers
-- [x] Wire `clone_repo` → fan-out to both `log_analysis` and `file_identification` using LangGraph `Send`
+- [x] Wire `clone_repo` â†’ fan-out to both `log_analysis` and `file_identification` using LangGraph `Send`
 - [x] Wire fan-in from both parallel nodes into `change_inspection`
 - [x] Implement per-run `asyncio.Queue` event bus and `record_agent_step` helper
 - [x] Write `tests/test_workflow.py`
@@ -671,19 +671,19 @@ approval interrupt, and the iteration loop. Each node emits SSE events.
 
 **Status:** [-] in progress
 
-**Implemented so far:** `backend/workflow.py` now wires clone → parallel analysis → change inspection → hypothesis → patch → approval interrupt → local patch application → pytest → retry (up to 3 iterations) → persisted `ResolutionReport`. Every stage records an `AgentStep`; per-run events include step lifecycle, approval, patch-ready, and completion events. `tests/test_workflow.py` covers approval/rejection and retry behavior. Runtime test execution remains to be verified.
+**Implemented so far:** `backend/workflow.py` now wires clone â†’ parallel analysis â†’ change inspection â†’ hypothesis â†’ patch â†’ approval interrupt â†’ local patch application â†’ pytest â†’ retry (up to 3 iterations) â†’ persisted `ResolutionReport`. Every stage records an `AgentStep`; per-run events include step lifecycle, approval, patch-ready, and completion events. `tests/test_workflow.py` covers approval/rejection and retry behavior. Runtime test execution remains to be verified.
 
 ---
 
-### ST-06 — FastAPI routers and SSE
+### ST-06 â€” FastAPI routers and SSE
 **Intent:** Expose all REST and SSE endpoints the frontend needs.
 
 **Expected outcomes:**
-- `POST /api/runs` — creates BugReport + WorkflowRun, starts workflow in background task, returns `{run_id}`
-- `GET  /api/runs/{id}` — returns run status + ordered list of AgentSteps with evidence
-- `GET  /api/runs/{id}/events` — SSE stream; pushes events until terminal state
-- `POST /api/runs/{id}/approve` — body `{"approved": bool}`; calls `resume_workflow`; returns updated status
-- `GET  /api/reports/{run_id}` — returns ResolutionReport
+- `POST /api/runs` â€” creates BugReport + WorkflowRun, starts workflow in background task, returns `{run_id}`
+- `GET  /api/runs/{id}` â€” returns run status + ordered list of AgentSteps with evidence
+- `GET  /api/runs/{id}/events` â€” SSE stream; pushes events until terminal state
+- `POST /api/runs/{id}/approve` â€” body `{"approved": bool}`; calls `resume_workflow`; returns updated status
+- `GET  /api/reports/{run_id}` â€” returns ResolutionReport
 
 **Todo:**
 - [x] Implement `backend/routers/runs.py`
@@ -697,7 +697,7 @@ approval interrupt, and the iteration loop. Each node emits SSE events.
 
 ---
 
-### ST-07 — Frontend scaffold, types, and API layer
+### ST-07 â€” Frontend scaffold, types, and API layer
 **Intent:** Bootstrap the React/TypeScript/Vite/Tailwind app and implement the
 typed API client and SSE hook so page components can be built independently.
 
@@ -719,7 +719,32 @@ typed API client and SSE hook so page components can be built independently.
 
 ---
 
-### ST-08 — Frontend pages and components
+### ST-08 â€” Real repository support
+**Intent:** Let users launch the existing workflow against a local Git working
+tree or a Git URL, using an isolated workspace and a repository-specific test
+command.
+
+**Expected outcomes:**
+- New Debug Run form accepts a local repository path or Git URL, branch, test command, issue title, and failure details
+- Local paths are validated as Git working trees before a run is created
+- The existing clone, agent, approval, patch, retry, and report workflow handles the selected repository
+- User-selected test commands run inside the isolated workspace without a shell
+- `demo-target/` remains available as the deterministic fixture
+
+**Todo:**
+- [x] Add local repository and Git URL choices to the New Debug Run form
+- [x] Pass branch, issue details, and test command through the existing run API
+- [x] Validate local Git repositories and use the existing isolated clone tool
+- [x] Run the selected test command through the existing workflow test runner
+- [ ] Verify the complete flow against a local repository and a Git URL
+
+**Status:** [-] in progress
+
+**Implemented so far:** Added the New Debug Run form, API payload fields, local Git working-tree validation, Vite API proxy, and custom command execution in the existing workflow. Runtime end-to-end verification remains.
+
+---
+
+### ST-09 â€” Frontend pages and components
 **Intent:** Build all UI views. Evidence is always rendered via `EvidenceCard`.
 The `PatchApprovalPanel` is the centrepiece of the demo and must be prominent.
 
@@ -744,17 +769,17 @@ The `PatchApprovalPanel` is the centrepiece of the demo and must be prominent.
 
 ---
 
-### ST-09 — Integration, demo validation, and README
+### ST-10 â€” Integration, demo validation, and README
 **Intent:** Validate the full end-to-end demo and produce a README so judges
 can run the demo in under 5 minutes.
 
 **Expected outcomes:**
 - `pytest tests/` passes
-- Full demo run: submit pre-filled bug report → watch 8 steps (2 in parallel) → approve patch → both tests pass → report names correct root cause
+- Full demo run: submit pre-filled bug report â†’ watch 8 steps (2 in parallel) â†’ approve patch â†’ both tests pass â†’ report names correct root cause
 - `README.md` covers prerequisites, `.env` setup, start commands, and a 3-minute demo script
 
 **Todo:**
-- [ ] Run `pytest tests/` — fix any failures
+- [ ] Run `pytest tests/` â€” fix any failures
 - [ ] Run full end-to-end demo with local Ollama (`qwen2.5-coder:1.5b`)
 - [ ] Verify ResolutionReport names "rename refactor" + `pricing.py` formula as root cause
 - [ ] Verify both `test_payment_no_coupon` and `test_payment_with_coupon` pass after patch

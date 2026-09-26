@@ -31,7 +31,7 @@ def _inside_workspace(
 
 
 def clone_repo(url: str, branch: str) -> str:
-    """Clone a branch to a new temporary directory and return its path."""
+    """Clone a URL or local Git repository branch into a temporary workspace."""
     destination = Path(tempfile.mkdtemp(prefix="devloop-repo-"))
     try:
         Repo.clone_from(url, str(destination), branch=branch, single_branch=True)

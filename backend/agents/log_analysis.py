@@ -1,7 +1,7 @@
-from typing import Any
+﻿from typing import Any
 
-from backend.agents.llm_utils import parse_json_response
-from backend.llm_client import get_llm
+from agents.llm_utils import parse_json_response
+from llm_client import get_llm
 
 
 def analyze_log(

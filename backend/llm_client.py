@@ -1,6 +1,6 @@
 from langchain_ollama import ChatOllama
 
-from backend.config import settings
+from config import settings
 
 
 def get_llm() -> ChatOllama:
@@ -8,4 +8,5 @@ def get_llm() -> ChatOllama:
     return ChatOllama(
         model=settings.ollama_model,
         temperature=0,
+        format="json",
     )

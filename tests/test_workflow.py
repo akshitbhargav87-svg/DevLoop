@@ -11,6 +11,8 @@ from unittest.mock import Mock
 from backend.database import Base
 from backend.models import AgentStep, BugReport, ResolutionReport, WorkflowRun
 from backend.workflow import (
+    _workspace_log_evidence,
+    _workspace_file_evidence,
     get_event_queue,
     publish_event,
     resume_workflow,
@@ -18,6 +20,36 @@ from backend.workflow import (
     record_agent_step,
     remove_event_queue,
 )
+
+
+def test_stale_log_analysis_path_is_removed_before_hypothesis():
+    evidence = {
+        "exception": "CouponDiscountCalculationError",
+        "module": "app/coupon/discount.py",
+        "line": 123,
+        "call_chain": ["app/coupon/discount.py:123"],
+    }
+    assert _workspace_log_evidence(evidence, {"pricing.py", "test_pricing.py"}) == {
+        "exception": "Unknown",
+        "module": "",
+        "line": 0,
+        "call_chain": [],
+    }
+
+
+def test_stale_file_identification_path_is_removed_before_hypothesis():
+    evidence = {
+        "files": [
+            {"path": "app/coupon/discount.py", "relevance_reason": "Stale", "rank": 1},
+            {"path": "pricing.py", "relevance_reason": "In repository", "rank": 2},
+        ]
+    }
+
+    assert _workspace_file_evidence(evidence, {"pricing.py", "test_pricing.py"}) == {
+        "files": [
+            {"path": "pricing.py", "relevance_reason": "In repository", "rank": 2}
+        ]
+    }
 
 
 @pytest.fixture
@@ -184,6 +216,13 @@ def test_workflow_pauses_for_approval_after_parallel_analysis(
     )
     monkeypatch.setattr("backend.tools.test_tools.apply_patch", lambda path, diff: True)
     monkeypatch.setattr(
+        "backend.tools.test_tools.validate_patch",
+        lambda path, diff, command=None, **kwargs: {
+            "passed": True,
+            "test_results": {"passed": 2, "failed": 0, "errors": []},
+        },
+    )
+    monkeypatch.setattr(
         "backend.tools.test_tools.run_pytest",
         lambda path: {"passed": 2, "failed": 0, "errors": [], "output_excerpt": "2 passed"},
     )
@@ -310,6 +349,13 @@ def test_workflow_retries_failed_tests_then_persists_report(
         ]
     )
     monkeypatch.setattr("backend.tools.test_tools.apply_patch", apply_patch_mock)
+    monkeypatch.setattr(
+        "backend.tools.test_tools.validate_patch",
+        lambda path, diff, command=None, **kwargs: {
+            "passed": True,
+            "test_results": {"passed": 2, "failed": 0, "errors": []},
+        },
+    )
     monkeypatch.setattr("backend.tools.test_tools.run_pytest", pytest_mock)
 
     started = run_workflow(

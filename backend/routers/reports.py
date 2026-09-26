@@ -8,8 +8,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 if __package__ and __package__.startswith("backend."):
-    from backend.database import get_db
-    from backend.models import ResolutionReport
+    from database import get_db
+    from models import ResolutionReport
 else:  # Support the documented `cd backend; uvicorn main:app` launch.
     from database import get_db
     from models import ResolutionReport
