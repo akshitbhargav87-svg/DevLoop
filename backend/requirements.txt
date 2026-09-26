@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+sqlalchemy
+pydantic-settings
+gitpython
+ibm-watsonx-ai
+langchain-ibm
+langgraph
+python-dotenv
+sse-starlette
+pytest
