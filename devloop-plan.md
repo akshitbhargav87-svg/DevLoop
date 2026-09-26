@@ -686,12 +686,14 @@ approval interrupt, and the iteration loop. Each node emits SSE events.
 - `GET  /api/reports/{run_id}` — returns ResolutionReport
 
 **Todo:**
-- [ ] Implement `backend/routers/runs.py`
-- [ ] Implement `backend/routers/reports.py`
-- [ ] Wire SSE endpoint to per-run `asyncio.Queue`
-- [ ] Register routers and add CORS in `main.py`
+- [x] Implement `backend/routers/runs.py`
+- [x] Implement `backend/routers/reports.py`
+- [x] Wire SSE endpoint to per-run `asyncio.Queue`
+- [x] Register routers and add CORS in `main.py`
 
-**Status:** [ ] pending
+**Status:** [-] in progress
+
+**Implemented so far:** The FastAPI app exposes run creation, run inspection with ordered step evidence, approval/rejection, SSE event streaming, and report retrieval. Run creation persists the bug and run before starting the existing workflow in a background task. Endpoint tests cover these routes; runtime execution remains to be verified.
 
 ---
 
