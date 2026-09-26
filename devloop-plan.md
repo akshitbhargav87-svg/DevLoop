@@ -664,14 +664,14 @@ approval interrupt, and the iteration loop. Each node emits SSE events.
 - [x] Wire fan-in from both parallel nodes into `change_inspection`
 - [x] Implement per-run `asyncio.Queue` event bus and `record_agent_step` helper
 - [x] Write `tests/test_workflow.py`
-- [ ] Implement `hypothesis_node`, `patch_node`, `apply_patch_node`, `test_runner_node`, `report_node`
-- [ ] Implement approval interrupt using LangGraph `MemorySaver` checkpoint
-- [ ] Implement `resume_workflow(run_id, approved: bool)`
-- [ ] Add conditional edge for iteration loop
+- [x] Implement `hypothesis_node`, `patch_node`, `apply_patch_node`, `test_runner_node`, `report_node`
+- [x] Implement approval interrupt using LangGraph `MemorySaver` checkpoint
+- [x] Implement `resume_workflow(run_id, approved: bool)`
+- [x] Add conditional edge for iteration loop
 
 **Status:** [-] in progress
 
-**Implemented so far:** `backend/workflow.py` exists with `WorkflowState`, event queue infrastructure, `record_agent_step`, and a partial `StateGraph` covering clone → parallel analysis fan-out → change_inspection. The analysis phase (4 nodes) is complete. Hypothesis, patch, apply, test, and report nodes are not yet wired.
+**Implemented so far:** `backend/workflow.py` now wires clone → parallel analysis → change inspection → hypothesis → patch → approval interrupt → local patch application → pytest → retry (up to 3 iterations) → persisted `ResolutionReport`. Every stage records an `AgentStep`; per-run events include step lifecycle, approval, patch-ready, and completion events. `tests/test_workflow.py` covers approval/rejection and retry behavior. Runtime test execution remains to be verified.
 
 ---
 

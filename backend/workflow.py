@@ -27,11 +27,13 @@ class WorkflowState(TypedDict, total=False):
     patch_diff: str
     patch_description: str
     patch_approved: bool | None
+    patch_applied: bool
     test_output: dict[str, Any]
     test_passed: bool
     iteration: int
     previous_failures: list[str]
     report: dict[str, Any]
+    report_id: str
 
 
 SessionFactory = Callable[[], Session]
@@ -174,11 +176,14 @@ def _set_run_status(
     session_factory: SessionFactory,
     run_id: str,
     status: str,
+    iteration: int | None = None,
 ) -> None:
     with session_factory() as db:
         run = db.get(WorkflowRun, run_id)
         if run is not None:
             run.status = status
+            if iteration is not None:
+                run.iteration = iteration
             if status in {"completed", "failed", "rejected"}:
                 run.completed_at = datetime.utcnow()
             db.commit()
@@ -397,6 +402,122 @@ def build_workflow(
         _finish_approval_step(session_factory, state["run_id"], step_id, approved)
         return {"patch_approved": approved}
 
+    def apply_patch_node(state: WorkflowState) -> dict[str, Any]:
+        from backend.tools.test_tools import apply_patch
+
+        applied = record_agent_step(
+            session_factory,
+            state["run_id"],
+            "apply_patch",
+            lambda: {
+                "success": apply_patch(
+                    state["workspace_dir"],
+                    state.get("patch_diff", ""),
+                )
+            },
+        )["success"]
+        return {"patch_applied": bool(applied)}
+
+    def test_runner_node(state: WorkflowState) -> dict[str, Any]:
+        from backend.tools.test_tools import run_pytest
+
+        def run_tests() -> dict[str, Any]:
+            result = run_pytest(state["workspace_dir"])
+            if not state.get("patch_applied", False):
+                result = {
+                    **result,
+                    "errors": [
+                        *result.get("errors", []),
+                        "Patch application failed; tests ran against the unchanged workspace.",
+                    ],
+                }
+            return result
+
+        result = record_agent_step(
+            session_factory,
+            state["run_id"],
+            "test_runner",
+            run_tests,
+        )
+        passed = (
+            state.get("patch_applied", False)
+            and result.get("passed", 0) > 0
+            and result.get("failed", 0) == 0
+            and result.get("errors", []) == []
+        )
+        return {"test_output": result, "test_passed": passed}
+
+    def prepare_retry_node(state: WorkflowState) -> dict[str, Any]:
+        output = state.get("test_output", {})
+        failure = output.get("output_excerpt") or json.dumps(
+            {"failed": output.get("failed", 0), "errors": output.get("errors", [])},
+            ensure_ascii=False,
+            default=str,
+        )
+        previous_failures = [*state.get("previous_failures", []), failure]
+        iteration = state.get("iteration", 1) + 1
+        with session_factory() as db:
+            run = db.get(WorkflowRun, state["run_id"])
+            if run is not None:
+                run.iteration = iteration
+                db.commit()
+        return {"previous_failures": previous_failures, "iteration": iteration}
+
+    def report_node(state: WorkflowState) -> dict[str, Any]:
+        from backend.agents.report import generate_report
+        from backend.models.resolution_report import ResolutionReport
+
+        test_result = state.get(
+            "test_output",
+            {"passed": 0, "failed": 0, "errors": [], "output_excerpt": ""},
+        )
+        patch_result = {
+            **state.get("patch_result", {}),
+            "approved": bool(state.get("patch_approved", False)),
+            "applied": bool(state.get("patch_applied", False)),
+        }
+
+        def persist_report() -> dict[str, Any]:
+            report_data = generate_report(
+                state["run_id"],
+                state.get("hypothesis", {}),
+                patch_result,
+                test_result,
+                state.get("iteration", 1),
+            )
+            with session_factory() as db:
+                report = ResolutionReport(**report_data)
+                db.add(report)
+                db.commit()
+                report_data["id"] = report.id
+            return report_data
+
+        result = record_agent_step(
+            session_factory,
+            state["run_id"],
+            "report",
+            persist_report,
+        )
+        final_status = (
+            "rejected"
+            if not state.get("patch_approved", False)
+            else "completed"
+        )
+        _set_run_status(session_factory, state["run_id"], final_status)
+        publish_event(
+            state["run_id"],
+            {"type": "run_completed", "report_id": result["id"]},
+        )
+        return {"report": result, "report_id": result["id"]}
+
+    def after_approval(state: WorkflowState) -> str:
+        return "apply_patch" if state.get("patch_approved") else "report"
+
+    def after_tests(state: WorkflowState) -> str:
+        if state.get("test_passed") or state.get("iteration", 1) >= 3:
+            return "report"
+        return "prepare_retry"
+
     def dispatch_analysis(state: WorkflowState) -> list[Any]:
         return [
             Send("log_analysis", state),
@@ -411,6 +532,10 @@ def build_workflow(
     graph.add_node("hypothesis", hypothesis_node)
     graph.add_node("patch", patch_node)
     graph.add_node("awaiting_approval", approval_node)
+    graph.add_node("apply_patch", apply_patch_node)
+    graph.add_node("test_runner", test_runner_node)
+    graph.add_node("prepare_retry", prepare_retry_node)
+    graph.add_node("report", report_node)
     graph.add_edge(START, "clone_repo")
     graph.add_conditional_edges(
         "clone_repo",
@@ -421,7 +546,19 @@ def build_workflow(
     graph.add_edge("change_inspection", "hypothesis")
     graph.add_edge("hypothesis", "patch")
     graph.add_edge("patch", "awaiting_approval")
-    graph.add_edge("awaiting_approval", END)
+    graph.add_conditional_edges(
+        "awaiting_approval",
+        after_approval,
+        {"apply_patch": "apply_patch", "report": "report"},
+    )
+    graph.add_edge("apply_patch", "test_runner")
+    graph.add_conditional_edges(
+        "test_runner",
+        after_tests,
+        {"report": "report", "prepare_retry": "prepare_retry"},
+    )
+    graph.add_edge("prepare_retry", "hypothesis")
+    graph.add_edge("report", END)
     return graph.compile(checkpointer=checkpointer or _memory_checkpointer())
 
 
@@ -432,7 +569,7 @@ def run_workflow(
     checkpointer: Any | None = None,
 ) -> WorkflowState:
     """Start a workflow and pause after the patch is ready for approval."""
-    _set_run_status(session_factory, run_id, "running")
+    _set_run_status(session_factory, run_id, "running", iteration=1)
     graph = build_workflow(session_factory, checkpointer=checkpointer)
     config = {"configurable": {"thread_id": run_id}}
     try:
@@ -442,7 +579,14 @@ def run_workflow(
                 "bug_report": bug_report,
                 "workspace_dir": "",
                 "previous_failures": [],
-                "iteration": 0,
+                "iteration": 1,
+                "test_output": {
+                    "passed": 0,
+                    "failed": 0,
+                    "errors": [],
+                    "output_excerpt": "",
+                },
+                "patch_applied": False,
             },
             config=config,
         )

@@ -110,3 +110,15 @@ def test_generate_report_accepts_patchagent_patch_field():
     )
 
     assert result["changes_made"].startswith("--- a/store/pricing.py")
+
+
+def test_generate_report_does_not_approve_when_no_tests_passed():
+    result = generate_report(
+        run_id="run-no-tests",
+        hypothesis={"root_cause": "Incorrect coupon arithmetic."},
+        patch_result={"patch": "diff", "approved": True, "applied": True},
+        test_result={"passed": 0, "failed": 0, "errors": []},
+        iteration_count=1,
+    )
+
+    assert result["patch_approved"] == 0

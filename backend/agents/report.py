@@ -37,6 +37,8 @@ def generate_report(
 
     patch_approved = int(
         bool(patch_result.get("approved", patch_result.get("success", False)))
+        and bool(patch_result.get("applied", True))
+        and test_result.get("passed", 0) > 0
         and test_result.get("failed", 0) == 0
         and test_result.get("errors", []) == []
     )
