@@ -6,12 +6,14 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from git import Repo
 
 from backend.database import Base, get_db
 from backend.main import app
 from backend.models import AgentStep, BugReport, ResolutionReport, WorkflowRun
 from backend.workflow import publish_event, remove_event_queue
 from backend.routers import runs as runs_router
+from backend import config as backend_config
 
 
 @pytest.fixture
@@ -83,11 +85,92 @@ def test_create_run_persists_report_and_starts_workflow(api_db, monkeypatch):
     assert len(calls) == 1
     assert calls[0][0] == run_id
     assert calls[0][1]["title"] == "Broken checkout"
+    assert calls[0][1]["apply_to_source"] is False
     with api_db() as db:
         run = db.get(WorkflowRun, run_id)
         assert run is not None
         assert run.status == "pending"
         assert db.get(BugReport, run.bug_report_id).repo_url.endswith("demo.git")
+
+
+def test_create_local_run_can_opt_into_source_application(api_db, monkeypatch, tmp_path):
+    repository = tmp_path / "local-repository"
+    Repo.init(repository, initial_branch="main")
+    calls = []
+    monkeypatch.setattr(
+        runs_router,
+        "run_workflow",
+        lambda run_id, bug_report, factory: calls.append(bug_report),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/runs",
+            json={
+                "title": "Broken checkout",
+                "description": "Coupon amount is returned as the total.",
+                "repo_url": str(repository),
+                "repository_type": "local",
+                "branch": "main",
+                "apply_to_source": True,
+            },
+        )
+
+    assert response.status_code == 200
+    assert calls[0]["apply_to_source"] is True
+    assert calls[0]["repository_type"] == "local"
+    assert calls[0]["repo_url"] == str(repository.resolve())
+
+
+def test_create_run_rejects_source_application_for_git_urls(api_db):
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/runs",
+            json={
+                "title": "Broken checkout",
+                "description": "Coupon amount is returned as the total.",
+                "repo_url": "https://example.invalid/demo.git",
+                "repository_type": "git",
+                "apply_to_source": True,
+            },
+        )
+
+    assert response.status_code == 422
+    assert "requires a local repository" in response.json()["detail"]
+
+
+def test_public_deployment_rejects_local_repository_paths(api_db, monkeypatch):
+    monkeypatch.setattr(backend_config.settings, "allow_local_repositories", False)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/runs",
+            json={
+                "title": "Broken checkout",
+                "description": "Coupon amount is wrong.",
+                "repo_url": "C:/server/private-repo",
+                "repository_type": "local",
+            },
+        )
+
+    assert response.status_code == 403
+    assert "disabled on this public deployment" in response.json()["detail"]
+
+
+def test_deployment_access_code_protects_api_and_sets_http_only_cookie(api_db, monkeypatch):
+    monkeypatch.setattr(backend_config.settings, "access_token", "demo-secret")
+    run_id = _make_run(api_db)
+
+    with TestClient(app) as client:
+        blocked = client.get(f"/api/runs/{run_id}")
+        wrong_login = client.post("/api/auth/login", json={"token": "wrong"})
+        login = client.post("/api/auth/login", json={"token": "demo-secret"})
+        allowed = client.get(f"/api/runs/{run_id}")
+
+    assert blocked.status_code == 401
+    assert wrong_login.status_code == 401
+    assert login.status_code == 200
+    assert "httponly" in login.headers["set-cookie"].lower()
+    assert allowed.status_code == 200
 
 
 def test_get_run_returns_ordered_steps_and_decoded_evidence(api_db):

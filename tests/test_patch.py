@@ -172,3 +172,68 @@ def test_generate_patch_materializes_exact_explanation_replacement():
     assert result["files_changed"] == ["pricing.py"]
     assert "-    return total * coupon_rate" in result["patch"]
     assert "+    return total * (1 - coupon_rate)" in result["patch"]
+
+
+def test_generate_patch_accepts_missing_stack_trace():
+    llm = _mock_llm_response(
+        '{"patch":"--- a/pricing.py\\n+++ b/pricing.py\\n@@ -1 +1 @@\\n-old\\n+new",'
+        '"files_changed":["pricing.py"],"explanation":"Fix it."}'
+    )
+    with patch("backend.agents.patch.get_llm", return_value=llm):
+        result = generate_patch(
+            {
+                "root_cause": "The function incorrectly handles coupon_rate=None.",
+                "affected_files": ["pricing.py"],
+                "fix_strategy": "Return total when coupon_rate is None.",
+            },
+            {"pricing.py": "old"},
+            ["Prior candidate failed with expected 75, actual 25."],
+            bug_report={
+                "description": "Fix this",
+                "stack_trace": None,
+                "test_evidence": {
+                    "test_pricing.py": "assert calculate_discount(100, 0.25) == 75"
+                },
+            },
+        )
+
+    assert result["files_changed"] == ["pricing.py"]
+    prompt = llm.invoke.call_args.args[0]
+    assert "Failing test output:" in prompt
+    assert "Repository tests (read-only, authoritative expected behavior):" in prompt
+    assert "hypothesis is only a guess" in prompt
+    assert "verify it equals the asserted result" in prompt
+    assert "Prior candidate failed with expected 75, actual 25." not in prompt
+    assert "calculate_discount(100, 0.25) == 75" in prompt
+    assert "The function incorrectly handles coupon_rate=None." not in prompt
+    assert "test_pricing.py" in prompt
+
+
+def test_generate_patch_uses_test_gated_discount_fallback_after_failure():
+    llm = Mock()
+    source = (
+        "def calculate_discount(total, coupon_rate=None):\n"
+        "    if coupon_rate is None:\n"
+        "        return total\n"
+        "    return total * coupon_rate\n"
+    )
+    with patch("backend.agents.patch.get_llm", return_value=llm):
+        result = generate_patch(
+            {"affected_files": ["pricing.py"]},
+            {"pricing.py": source},
+            previous_failures=["The candidate did not pass the repository tests."],
+            bug_report={
+                "test_evidence": {
+                    "test_pricing.py": (
+                        "from pricing import calculate_discount\n"
+                        "def test_coupon_discount():\n"
+                        "    result = calculate_discount(100, 0.25)\n"
+                        "    assert result == 75\n"
+                    )
+                }
+            },
+        )
+
+    assert result["files_changed"] == ["pricing.py"]
+    assert "+    return total * (1 - coupon_rate)" in result["patch"]
+    llm.invoke.assert_not_called()

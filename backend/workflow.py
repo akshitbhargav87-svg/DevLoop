@@ -5,7 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import sqlite3
+import traceback
 from datetime import datetime
+from pathlib import Path
 from threading import Lock
 from typing import Any, Callable, TypedDict
 
@@ -19,6 +22,9 @@ class WorkflowState(TypedDict, total=False):
     run_id: str
     bug_report: dict[str, Any]
     workspace_dir: str
+    source_head_sha: str
+    patch_base_hashes: dict[str, str]
+    patch_target: str
     log_analysis: dict[str, Any]
     relevant_files: dict[str, Any]
     recent_changes: dict[str, Any]
@@ -39,20 +45,46 @@ class WorkflowState(TypedDict, total=False):
 SessionFactory = Callable[[], Session]
 StepOperation = Callable[[], Any]
 
+
+def _split_patchable_files(paths: list[str]) -> tuple[list[str], list[str]]:
+    """Keep tests available as evidence without allowing them as patch targets."""
+    implementation: list[str] = []
+    tests: list[str] = []
+    for path in paths:
+        normalized = path.replace("\\", "/")
+        name = normalized.rsplit("/", 1)[-1].lower()
+        parts = {part.lower() for part in normalized.split("/")}
+        is_test = (
+            "tests" in parts
+            or name.startswith("test_")
+            or name.endswith("_test.py")
+            or name.endswith(".spec.ts")
+            or name.endswith(".spec.tsx")
+        )
+        (tests if is_test else implementation).append(path)
+    return implementation, tests
+
 _event_queues: dict[str, asyncio.Queue[dict[str, Any]]] = {}
 _event_loops: dict[str, asyncio.AbstractEventLoop] = {}
 _event_queues_lock = Lock()
 _default_checkpointer: Any | None = None
 _checkpointer_lock = Lock()
+_MAX_PATCH_ATTEMPTS = 5
 
 
-def _memory_checkpointer() -> Any:
+def _sqlite_checkpointer() -> Any:
     global _default_checkpointer
     with _checkpointer_lock:
         if _default_checkpointer is None:
-            from langgraph.checkpoint.memory import MemorySaver
+            from langgraph.checkpoint.sqlite import SqliteSaver
 
-            _default_checkpointer = MemorySaver()
+            from config import settings
+
+            checkpoint_path = Path(settings.checkpoint_path).expanduser()
+            checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+            connection = sqlite3.connect(checkpoint_path, check_same_thread=False)
+            _default_checkpointer = SqliteSaver(connection)
+            _default_checkpointer.setup()
         return _default_checkpointer
 
 
@@ -128,7 +160,11 @@ def record_agent_step(
     try:
         result = operation()
     except Exception as exc:
-        evidence = {"error": str(exc)}
+        evidence = {
+            "error": str(exc),
+            "exception_type": type(exc).__name__,
+            "traceback": traceback.format_exc(),
+        }
         with session_factory() as db:
             step = db.get(AgentStep, step_id)
             if step is not None:
@@ -138,7 +174,11 @@ def record_agent_step(
                 db.commit()
         publish_event(
             run_id,
-            {"type": "step_failed", "step_name": step_name, "error": str(exc)},
+            {
+                "type": "step_failed",
+                "step_name": step_name,
+                **evidence,
+            },
         )
         raise
 
@@ -290,13 +330,21 @@ def build_workflow(
                 )
             },
         )["workspace_dir"]
+        source_head_sha = ""
+        if bug_report.get("apply_to_source"):
+            from git import Repo
+
+            source_head_sha = Repo(
+                workspace,
+                search_parent_directories=False,
+            ).head.commit.hexsha
         with session_factory() as db:
             run = db.get(WorkflowRun, state["run_id"])
             if run is not None:
                 run.workspace_dir = workspace
                 run.status = "running"
                 db.commit()
-        return {"workspace_dir": workspace}
+        return {"workspace_dir": workspace, "source_head_sha": source_head_sha}
 
     def log_analysis_node(state: WorkflowState) -> dict[str, Any]:
         from agents.log_analysis import analyze_log
@@ -382,6 +430,8 @@ def build_workflow(
             path: read_file(state["workspace_dir"], path)[:12000]
             for path in paths
         }
+        _, test_paths = _split_patchable_files(paths)
+        test_evidence = {path: file_contents[path] for path in test_paths}
 
         result = record_agent_step(
             session_factory,
@@ -394,6 +444,7 @@ def build_workflow(
                 state.get("previous_failures", []),
                 state.get("bug_report", {}),
                 file_contents,
+                test_evidence,
             ),
         )
         return {"hypothesis": result}
@@ -406,27 +457,50 @@ def build_workflow(
         hypothesis = state.get("hypothesis", {})
 
         def create_patch() -> dict[str, Any]:
-            file_contents = {
-                path: read_file(state["workspace_dir"], path)
+            candidate_paths = [
+                path
                 for path in hypothesis.get("affected_files", [])
                 if isinstance(path, str)
+            ]
+            implementation_paths, hypothesis_test_paths = _split_patchable_files(candidate_paths)
+            identified_paths = [
+                item["path"]
+                for item in state.get("relevant_files", {}).get("files", [])
+                if isinstance(item, dict) and isinstance(item.get("path"), str)
+            ]
+            _, identified_test_paths = _split_patchable_files(identified_paths)
+            available_paths = set(list_files(state["workspace_dir"]).splitlines())
+            test_paths = [
+                path
+                for path in dict.fromkeys([*hypothesis_test_paths, *identified_test_paths])
+                if path in available_paths
+            ][:5]
+            file_contents = {
+                path: read_file(state["workspace_dir"], path)
+                for path in implementation_paths
+            }
+            read_only_test_evidence = {
+                path: read_file(state["workspace_dir"], path)[:12000]
+                for path in test_paths
             }
             previous_failures = list(state.get("previous_failures", []))
             test_command = state.get("bug_report", {}).get("test_command")
 
-            for attempt in range(2):
+            for attempt in range(_MAX_PATCH_ATTEMPTS):
                 result = generate_patch(
                     hypothesis,
                     file_contents,
                     previous_failures,
-                    state.get("bug_report", {}),
+                    {
+                        **state.get("bug_report", {}),
+                        "test_evidence": read_only_test_evidence,
+                    },
                 )
                 declared = result.get("files_changed", [])
-                available = set(list_files(state["workspace_dir"]).splitlines())
                 invalid_declarations = (
                     not isinstance(declared, list)
                     or not declared
-                    or any(not isinstance(path, str) or path not in available for path in declared)
+                    or any(not isinstance(path, str) or path not in available_paths for path in declared)
                 )
                 if invalid_declarations:
                     validation = {
@@ -442,6 +516,14 @@ def build_workflow(
                     )
                 if validation.get("passed"):
                     result["preapproval_validation"] = validation
+                    if state.get("bug_report", {}).get("apply_to_source"):
+                        from tools.repo_tools import hash_files
+
+                        result["source_base_hashes"] = hash_files(
+                            state["workspace_dir"],
+                            result["files_changed"],
+                        )
+                        result["apply_to_source"] = True
                     return result
 
                 test_results = validation.get("test_results", {})
@@ -460,7 +542,7 @@ def build_workflow(
                 )
 
             raise RuntimeError(
-                "Generated patch did not pass pre-approval tests after two attempts. "
+                f"Generated patch did not pass pre-approval tests after {_MAX_PATCH_ATTEMPTS} attempts. "
                 f"{previous_failures[-1]}"
             )
 
@@ -482,6 +564,7 @@ def build_workflow(
             "patch_result": result,
             "patch_diff": result.get("patch", ""),
             "patch_description": result.get("explanation", ""),
+            "patch_base_hashes": result.get("source_base_hashes", {}),
         }
 
     def approval_node(state: WorkflowState) -> dict[str, Any]:
@@ -505,28 +588,46 @@ def build_workflow(
     def apply_patch_node(state: WorkflowState) -> dict[str, Any]:
         from tools.test_tools import apply_patch
 
-        applied = record_agent_step(
+        bug_report = state.get("bug_report", {})
+        def apply_approved_patch() -> dict[str, Any]:
+            target_workspace = state["workspace_dir"]
+            if bug_report.get("apply_to_source"):
+                from tools.repo_tools import verify_source_checkout
+
+                target_workspace = verify_source_checkout(
+                    bug_report["repo_url"],
+                    bug_report.get("branch") or "main",
+                    state.get("source_head_sha", ""),
+                    state.get("patch_base_hashes", {}),
+                )
+            success = apply_patch(target_workspace, state.get("patch_diff", ""))
+            if bug_report.get("apply_to_source") and not success:
+                raise RuntimeError(
+                    "The approved patch could not be applied to the source repository."
+                )
+            return {"success": success, "target_repository": target_workspace}
+
+        application = record_agent_step(
             session_factory,
             state["run_id"],
             "apply_patch",
-            lambda: {
-                "success": apply_patch(
-                    state["workspace_dir"],
-                    state.get("patch_diff", ""),
-                )
-            },
-        )["success"]
-        return {"patch_applied": bool(applied)}
+            apply_approved_patch,
+        )
+        return {
+            "patch_applied": bool(application["success"]),
+            "patch_target": application["target_repository"],
+        }
 
     def test_runner_node(state: WorkflowState) -> dict[str, Any]:
         from tools.test_tools import run_pytest
 
         def run_tests() -> dict[str, Any]:
             test_command = state.get("bug_report", {}).get("test_command")
+            test_workspace = state.get("patch_target") or state["workspace_dir"]
             if test_command:
-                result = run_pytest(state["workspace_dir"], test_command)
+                result = run_pytest(test_workspace, test_command)
             else:
-                result = run_pytest(state["workspace_dir"])
+                result = run_pytest(test_workspace)
             if not state.get("patch_applied", False):
                 result = {
                     **result,
@@ -618,6 +719,8 @@ def build_workflow(
         return "apply_patch" if state.get("patch_approved") else "report"
 
     def after_tests(state: WorkflowState) -> str:
+        if state.get("bug_report", {}).get("apply_to_source"):
+            return "report"
         if state.get("test_passed") or state.get("iteration", 1) >= 3:
             return "report"
         return "prepare_retry"
@@ -663,7 +766,7 @@ def build_workflow(
     )
     graph.add_edge("prepare_retry", "hypothesis")
     graph.add_edge("report", END)
-    return graph.compile(checkpointer=checkpointer or _memory_checkpointer())
+    return graph.compile(checkpointer=checkpointer or _sqlite_checkpointer())
 
 
 def run_workflow(

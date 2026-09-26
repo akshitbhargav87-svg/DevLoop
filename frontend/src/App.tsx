@@ -3,6 +3,7 @@ import "./App.css";
 
 type Theme = "dark" | "light";
 type RepositorySource = "local" | "git";
+const localRepositoryAccess = import.meta.env.VITE_ENABLE_LOCAL_REPOSITORIES !== "false";
 
 function getInitialTheme(): Theme {
   const savedTheme = window.localStorage.getItem("devloop-theme");
@@ -164,7 +165,13 @@ function eventStepStatus(eventType: string): StepStatus | undefined {
 
 function StatusIcon({ status }: { status: StepStatus }) {
   if (status === "done") {
-    return <span className="step-icon done">âœ“</span>;
+    return (
+      <span className="step-icon done">
+        <svg aria-hidden="true" viewBox="0 0 16 16">
+          <path d="m3.5 8.2 2.8 2.7 6.2-6" />
+        </svg>
+      </span>
+    );
   }
 
   if (status === "failed") {
@@ -193,8 +200,11 @@ function App() {
   const [runTitle, setRunTitle] = useState("");
   const [theme, setTheme] = useState<Theme>(getInitialTheme);
   const [showNewRun, setShowNewRun] = useState(false);
-  const [repositorySource, setRepositorySource] = useState<RepositorySource>("local");
+  const [repositorySource, setRepositorySource] = useState<RepositorySource>(
+    localRepositoryAccess ? "local" : "git",
+  );
   const [repositoryValue, setRepositoryValue] = useState("");
+  const [applyToSource, setApplyToSource] = useState(false);
   const [branch, setBranch] = useState("main");
   const [testCommand, setTestCommand] = useState("pytest -q");
   const [bugTitle, setBugTitle] = useState("");
@@ -202,6 +212,40 @@ function App() {
   const [stackTrace, setStackTrace] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState("");
+  const [authReady, setAuthReady] = useState(false);
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [accessCode, setAccessCode] = useState("");
+  const [authError, setAuthError] = useState("");
+
+  useEffect(() => {
+    let disposed = false;
+    fetch("/api/auth/status")
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error("Could not verify deployment access.");
+        }
+        return response.json() as Promise<{ authenticated: boolean }>;
+      })
+      .then((result) => {
+        if (!disposed) {
+          setIsAuthenticated(result.authenticated);
+        }
+      })
+      .catch((error: unknown) => {
+        if (!disposed) {
+          setAuthError(error instanceof Error ? error.message : "Could not connect to DevLoop.");
+        }
+      })
+      .finally(() => {
+        if (!disposed) {
+          setAuthReady(true);
+        }
+      });
+
+    return () => {
+      disposed = true;
+    };
+  }, []);
 
   useLayoutEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -422,6 +466,7 @@ function App() {
           stack_trace: stackTrace || null,
           repo_url: repositoryValue,
           repository_type: repositorySource,
+          apply_to_source: repositorySource === "local" && applyToSource,
           branch,
           test_command: testCommand,
         }),
@@ -447,6 +492,55 @@ function App() {
       setIsSubmitting(false);
     }
   };
+
+  const submitAccessCode = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setAuthError("");
+    try {
+      const response = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: accessCode }),
+      });
+      const result = await response.json() as { detail?: string; authenticated?: boolean };
+      if (!response.ok || !result.authenticated) {
+        throw new Error(result.detail || "Could not sign in.");
+      }
+      setIsAuthenticated(true);
+      setAccessCode("");
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : "Could not sign in.");
+    }
+  };
+
+  if (!authReady) {
+    return <main className="access-screen" aria-busy="true">Connecting to DevLoop...</main>;
+  }
+
+  if (!isAuthenticated) {
+    return (
+      <main className="access-screen">
+        <form className="access-form" onSubmit={submitAccessCode}>
+          <div className="brand-mark" aria-hidden="true">D</div>
+          <span className="panel-kicker">DEVLOOP</span>
+          <h1>Hackathon demo</h1>
+          <label className="form-field">
+            Access code
+            <input
+              autoFocus
+              required
+              type="password"
+              autoComplete="current-password"
+              value={accessCode}
+              onChange={(event) => setAccessCode(event.target.value)}
+            />
+          </label>
+          {authError && <p className="form-error" role="alert">{authError}</p>}
+          <button className="primary-button" type="submit">Continue</button>
+        </form>
+      </main>
+    );
+  }
 
   return (
     <div className="app-shell">
@@ -492,7 +586,7 @@ function App() {
             <div className="online-dot" />
             <div>
               <span>Local AI</span>
-              <strong>Ollama ï¿½ Qwen</strong>
+              <strong>Ollama / Qwen</strong>
             </div>
             <span className="status-label">ONLINE</span>
           </div>
@@ -640,7 +734,11 @@ function App() {
                     disabled={isApproving}
                     onClick={() => void decideApproval(true)}
                   >
-                    {isApproving ? "Submittingâ€¦" : "Approve & run tests"}
+                    {isApproving
+                      ? "Submitting..."
+                      : patchEvidence.apply_to_source === true
+                        ? "Approve, apply & test"
+                        : "Approve & run tests"}
                   </button>
                 </div>
               )}
@@ -685,7 +783,7 @@ function App() {
               {callChain.length > 0 && (
                 <div className="evidence-block">
                   <span>STACK TRACE CALL CHAIN</span>
-                  <code>{callChain.join(" â†’ ")}</code>
+                  <code>{callChain.join(" -> ")}</code>
                 </div>
               )}
 
@@ -717,6 +815,11 @@ function App() {
                 </strong>
                 {typeof patchEvidence.explanation === "string" && (
                   <p className="output-detail">{patchEvidence.explanation}</p>
+                )}
+                {typeof patchApplication.target_repository === "string" && (
+                  <p className="output-detail">
+                    Applied to: {patchApplication.target_repository}
+                  </p>
                 )}
                 {patchValidation.passed === true && (
                   <p className="output-detail">
@@ -780,7 +883,7 @@ function App() {
                 <div>
                   <span className="panel-kicker">START AN INVESTIGATION</span>
                   <h2 id="new-run-title">New Debug Run</h2>
-                  <p>DevLoop works on an isolated copy of your repository.</p>
+                  <p>DevLoop investigates an isolated copy. Source application is optional.</p>
                 </div>
                 <button
                   className="dialog-close"
@@ -789,34 +892,49 @@ function App() {
                   disabled={isSubmitting}
                   onClick={() => setShowNewRun(false)}
                 >
-                  Ã—
+                  <svg aria-hidden="true" viewBox="0 0 16 16">
+                    <path d="m3 3 10 10M13 3 3 13" />
+                  </svg>
                 </button>
               </div>
 
               <form className="new-run-form" onSubmit={createRun}>
                   <fieldset className="source-fieldset">
                     <legend>Repository source</legend>
-                    <div className="source-options">
-                      <label className={repositorySource === "local" ? "selected" : ""}>
-                        <input
-                          type="radio"
-                          name="repository-source"
-                          value="local"
-                          checked={repositorySource === "local"}
-                          onChange={() => setRepositorySource("local")}
-                        />
-                        <span aria-hidden="true">ðŸ“</span>
-                        Local Repository
-                      </label>
+                    <div className={`source-options ${localRepositoryAccess ? "" : "single"}`}>
+                      {localRepositoryAccess && (
+                        <label className={repositorySource === "local" ? "selected" : ""}>
+                          <input
+                            type="radio"
+                            name="repository-source"
+                            value="local"
+                            checked={repositorySource === "local"}
+                            onChange={() => setRepositorySource("local")}
+                          />
+                          <svg aria-hidden="true" viewBox="0 0 20 20">
+                            <path d="M2.5 5.5h6l1.7 2H17a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-8a1 1 0 0 1 .5-1Z" />
+                            <path d="M2.5 8h15" />
+                          </svg>
+                          Local Repository
+                        </label>
+                      )}
                       <label className={repositorySource === "git" ? "selected" : ""}>
                         <input
                           type="radio"
                           name="repository-source"
                           value="git"
                           checked={repositorySource === "git"}
-                          onChange={() => setRepositorySource("git")}
+                          onChange={() => {
+                            setRepositorySource("git");
+                            setApplyToSource(false);
+                          }}
                         />
-                        <span aria-hidden="true">â†—</span>
+                        <svg aria-hidden="true" viewBox="0 0 20 20">
+                          <circle cx="5" cy="4" r="2" />
+                          <circle cx="15" cy="15" r="2" />
+                          <circle cx="5" cy="15" r="2" />
+                          <path d="M5 6v7a2 2 0 0 0 2 2h6M5 9a6 6 0 0 0 6-6" />
+                        </svg>
                         Git URL
                       </label>
                     </div>
@@ -838,6 +956,22 @@ function App() {
                         : "Enter an HTTPS or SSH clone URL accessible to this machine."}
                     </small>
                   </label>
+
+                  {repositorySource === "local" && (
+                    <label className="apply-source-option">
+                      <input
+                        type="checkbox"
+                        checked={applyToSource}
+                        onChange={(event) => setApplyToSource(event.target.checked)}
+                      />
+                      <span>
+                        <strong>Apply approved patch to this checkout</strong>
+                        <small>
+                          Writes only after approval. The run stops if the branch or patch files change during review.
+                        </small>
+                      </span>
+                    </label>
+                  )}
 
                   <div className="form-row">
                     <label className="form-field">
@@ -907,7 +1041,7 @@ function App() {
                       Cancel
                     </button>
                     <button className="primary-button" type="submit" disabled={isSubmitting}>
-                      {isSubmitting ? "Startingâ€¦" : "Start Debug Run"}
+                      {isSubmitting ? "Starting..." : "Start Debug Run"}
                     </button>
                   </div>
               </form>

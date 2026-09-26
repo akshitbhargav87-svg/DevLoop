@@ -13,6 +13,8 @@ from git.exc import InvalidGitRepositoryError, NoSuchPathError
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from config import settings
+
 if __package__ and __package__.startswith("backend."):
     from database import SessionLocal, get_db
     from models import AgentStep, BugReport, WorkflowRun
@@ -32,6 +34,7 @@ class BugReportCreate(BaseModel):
     stack_trace: str | None = None
     repo_url: str
     repository_type: Literal["local", "git"] = "git"
+    apply_to_source: bool = False
     branch: str = "main"
     test_command: str | None = None
 
@@ -70,6 +73,16 @@ async def create_run(
     repository = request.repo_url.strip()
     if not repository:
         raise HTTPException(status_code=422, detail="Repository path or Git URL is required")
+    if request.apply_to_source and request.repository_type != "local":
+        raise HTTPException(
+            status_code=422,
+            detail="Applying patches to the source requires a local repository.",
+        )
+    if request.repository_type == "local" and not settings.allow_local_repositories:
+        raise HTTPException(
+            status_code=403,
+            detail="Local repository paths are disabled on this public deployment. Use a Git URL.",
+        )
     if request.repository_type == "local":
         try:
             local_path = Path(repository).expanduser().resolve(strict=True)
@@ -78,6 +91,23 @@ async def create_run(
             local_repo = Repo(str(local_path), search_parent_directories=False)
             if local_repo.working_tree_dir is None:
                 raise HTTPException(status_code=422, detail="Local path must be a Git working tree")
+            if request.apply_to_source:
+                try:
+                    active_branch = local_repo.active_branch.name
+                except TypeError:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="Apply-to-source requires a checked-out local branch.",
+                    )
+                requested_branch = request.branch.strip() or "main"
+                if active_branch != requested_branch:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            f"Apply-to-source requires '{requested_branch}' to be checked out "
+                            f"(currently on '{active_branch}')."
+                        ),
+                    )
             repository = str(local_path)
         except (InvalidGitRepositoryError, NoSuchPathError, OSError):
             raise HTTPException(status_code=422, detail="Local path must be an existing Git repository")
@@ -104,6 +134,8 @@ async def create_run(
         "description": bug_report.description,
         "stack_trace": bug_report.stack_trace,
         "repo_url": bug_report.repo_url,
+        "repository_type": request.repository_type,
+        "apply_to_source": request.apply_to_source,
         "branch": bug_report.branch,
         "test_command": request.test_command.strip() if request.test_command else None,
     }

@@ -1,0 +1,14 @@
+.git
+.venv
+**/.venv
+**/node_modules
+**/dist
+**/__pycache__
+**/.pytest_cache
+backend/.env
+backend/devloop.db*
+backend/workflow_checkpoints.sqlite*
+*.db
+*.sqlite*
+workflow_failure.txt
+_*.py

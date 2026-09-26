@@ -6,6 +6,40 @@ button {
   font: inherit;
 }
 
+.access-screen {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--page-bg);
+  color: var(--text-primary);
+}
+
+.access-form {
+  width: min(100%, 360px);
+  display: grid;
+  gap: 16px;
+  padding: 28px;
+  border: 1px solid var(--border-card);
+  border-radius: 10px;
+  background: var(--surface-raised);
+}
+
+.access-form h1 {
+  margin: -10px 0 4px;
+  color: var(--text-strong);
+  font-size: 22px;
+}
+
+.access-form .brand-mark {
+  margin-bottom: 4px;
+}
+
+.access-form .primary-button {
+  width: 100%;
+  margin: 0;
+}
+
 .app-shell {
   min-height: 100vh;
   display: flex;
@@ -319,6 +353,16 @@ button {
   background: var(--surface-hover);
 }
 
+.dialog-close svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-width: 1.7;
+  vertical-align: middle;
+}
+
 .source-fieldset {
   min-width: 0;
   margin: 0 0 18px;
@@ -366,6 +410,58 @@ button {
 
 .source-options label > span {
   font-size: 14px;
+}
+
+.source-options label > svg {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.5;
+}
+
+.source-options.single {
+  grid-template-columns: 1fr;
+}
+
+.apply-source-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px 12px;
+  border: 1px solid var(--border-card);
+  border-radius: 8px;
+  background: var(--surface-inset);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.apply-source-option input {
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  margin: 1px 0 0;
+  accent-color: var(--purple);
+}
+
+.apply-source-option span {
+  display: grid;
+  gap: 4px;
+}
+
+.apply-source-option strong {
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.apply-source-option small {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 400;
+  line-height: 1.45;
 }
 
 .new-run-form {
@@ -695,7 +791,16 @@ button {
 .step-icon.done {
   background: rgba(84, 217, 140, 0.12);
   color: var(--green-text);
-  font-size: 10px;
+}
+
+.step-icon.done svg {
+  width: 11px;
+  height: 11px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
 }
 
 .step-icon.running {

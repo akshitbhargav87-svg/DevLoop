@@ -1,9 +1,12 @@
 import asyncio
 import json
+import shutil
 from threading import Barrier, Thread
 from uuid import uuid4
 
 import pytest
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from unittest.mock import Mock
@@ -11,6 +14,7 @@ from unittest.mock import Mock
 from backend.database import Base
 from backend.models import AgentStep, BugReport, ResolutionReport, WorkflowRun
 from backend.workflow import (
+    _split_patchable_files,
     _workspace_log_evidence,
     _workspace_file_evidence,
     get_event_queue,
@@ -20,6 +24,14 @@ from backend.workflow import (
     record_agent_step,
     remove_event_queue,
 )
+
+
+def test_patch_targets_exclude_repository_tests_but_keep_them_identified():
+    implementation, tests = _split_patchable_files(
+        ["pricing.py", "test_pricing.py", "pkg/tests/test_discount.py"]
+    )
+    assert implementation == ["pricing.py"]
+    assert tests == ["test_pricing.py", "pkg/tests/test_discount.py"]
 
 
 def test_stale_log_analysis_path_is_removed_before_hypothesis():
@@ -122,7 +134,11 @@ def test_record_agent_step_marks_failures(workflow_db):
     with factory() as db:
         step = db.query(AgentStep).filter_by(run_id=run_id).one()
         assert step.status == "failed"
-        assert json.loads(step.evidence) == {"error": "agent failed"}
+        evidence = json.loads(step.evidence)
+        assert evidence["error"] == "agent failed"
+        assert evidence["exception_type"] == "ValueError"
+        assert "ValueError: agent failed" in evidence["traceback"]
+        assert "in fail" in evidence["traceback"]
 
     queue = get_event_queue(run_id)
     assert queue.get_nowait() == {"type": "step_started", "step_name": "hypothesis"}
@@ -130,6 +146,8 @@ def test_record_agent_step_marks_failures(workflow_db):
         "type": "step_failed",
         "step_name": "hypothesis",
         "error": "agent failed",
+        "exception_type": "ValueError",
+        "traceback": evidence["traceback"],
     }
 
 
@@ -185,43 +203,68 @@ def test_workflow_pauses_for_approval_after_parallel_analysis(
         barrier.wait()
         return {
             "files": [
-                {"path": "store/pricing.py", "relevance_reason": "Price formula", "rank": 1}
+                {"path": "store/pricing.py", "relevance_reason": "Price formula", "rank": 1},
+                {"path": "tests/test_pricing.py", "relevance_reason": "Expected behavior", "rank": 2},
             ]
         }
 
     monkeypatch.setattr("backend.tools.repo_tools.clone_repo", lambda url, branch: workspace)
-    monkeypatch.setattr("backend.tools.repo_tools.list_files", lambda path: "store/pricing.py")
+    monkeypatch.setattr(
+        "backend.tools.repo_tools.list_files",
+        lambda path: "store/pricing.py\ntests/test_pricing.py",
+    )
     monkeypatch.setattr("backend.agents.log_analysis.analyze_log", analyze_log)
     monkeypatch.setattr("backend.agents.file_identification.identify_files", identify_files)
-    monkeypatch.setattr(
-        "backend.tools.repo_tools.read_file",
-        lambda path, rel_path: "def calculate_discount(): return order_total * coupon_rate",
-    )
-    monkeypatch.setattr(
-        "backend.agents.hypothesis.generate_hypothesis",
-        lambda *args: {
+    def read_file(path, rel_path):
+        if rel_path == "tests/test_pricing.py":
+            return "assert calculate_discount(100, 0.25) == 75"
+        return "def calculate_discount(): return order_total * coupon_rate"
+
+    monkeypatch.setattr("backend.tools.repo_tools.read_file", read_file)
+    hypothesis_calls = []
+
+    def generate_hypothesis(*args):
+        hypothesis_calls.append(args)
+        return {
             "root_cause": "The pricing formula returns the coupon amount.",
             "affected_files": ["store/pricing.py"],
             "fix_strategy": "Return the discounted total.",
             "confidence": 0.9,
-        },
-    )
-    monkeypatch.setattr(
-        "backend.agents.patch.generate_patch",
-        lambda *args: {
+        }
+
+    monkeypatch.setattr("backend.agents.hypothesis.generate_hypothesis", generate_hypothesis)
+    patch_calls = []
+
+    def generate_patch(*args):
+        patch_calls.append(args)
+        return {
             "patch": "diff --git a/store/pricing.py b/store/pricing.py",
             "files_changed": ["store/pricing.py"],
             "explanation": "Fix the formula.",
-        },
-    )
+        }
+
+    monkeypatch.setattr("backend.agents.patch.generate_patch", generate_patch)
     monkeypatch.setattr("backend.tools.test_tools.apply_patch", lambda path, diff: True)
-    monkeypatch.setattr(
-        "backend.tools.test_tools.validate_patch",
-        lambda path, diff, command=None, **kwargs: {
+    validation_calls = []
+
+    def validate_patch(path, diff, command=None, **kwargs):
+        validation_calls.append(diff)
+        if len(validation_calls) < 3:
+            return {
+                "passed": False,
+                "test_results": {
+                    "passed": 1,
+                    "failed": 1,
+                    "errors": [],
+                    "output_excerpt": "expected 75, got 25",
+                },
+            }
+        return {
             "passed": True,
             "test_results": {"passed": 2, "failed": 0, "errors": []},
-        },
-    )
+        }
+
+    monkeypatch.setattr("backend.tools.test_tools.validate_patch", validate_patch)
     monkeypatch.setattr(
         "backend.tools.test_tools.run_pytest",
         lambda path: {"passed": 2, "failed": 0, "errors": [], "output_excerpt": "2 passed"},
@@ -235,17 +278,20 @@ def test_workflow_pauses_for_approval_after_parallel_analysis(
         lambda path, sha: "diff --git a/store/pricing.py b/store/pricing.py\n",
     )
 
-    result = run_workflow(
-        run_id,
-        {
-            "title": "Wrong checkout total",
-            "description": "Coupon charge is wrong.",
-            "stack_trace": "Expected 75, got 25",
-            "repo_url": "file:///demo-target",
-            "branch": "main",
-        },
-        factory,
-    )
+    checkpoint_path = tmp_path / "workflow-checkpoints.sqlite"
+    with SqliteSaver.from_conn_string(str(checkpoint_path)) as checkpointer:
+        result = run_workflow(
+            run_id,
+            {
+                "title": "Wrong checkout total",
+                "description": "Coupon charge is wrong.",
+                "stack_trace": "Expected 75, got 25",
+                "repo_url": "file:///demo-target",
+                "branch": "main",
+            },
+            factory,
+            checkpointer,
+        )
 
     assert result["workspace_dir"] == workspace
     assert result["log_analysis"]["exception"] == "AssertionError"
@@ -253,9 +299,20 @@ def test_workflow_pauses_for_approval_after_parallel_analysis(
     assert result["recent_changes"]["commits"][0]["files_changed"] == ["store/pricing.py"]
     assert result["hypothesis"]["root_cause"].startswith("The pricing formula")
     assert result["patch_result"]["files_changed"] == ["store/pricing.py"]
+    assert patch_calls[0][1] == {
+        "store/pricing.py": "def calculate_discount(): return order_total * coupon_rate"
+    }
+    assert patch_calls[0][3]["test_evidence"] == {
+        "tests/test_pricing.py": "assert calculate_discount(100, 0.25) == 75"
+    }
+    assert len(patch_calls) == len(validation_calls) == 3
+    assert hypothesis_calls[0][6] == {
+        "tests/test_pricing.py": "assert calculate_discount(100, 0.25) == 75"
+    }
     assert result.get("__interrupt__")
 
-    resumed = resume_workflow(run_id, approved, factory)
+    with SqliteSaver.from_conn_string(str(checkpoint_path)) as checkpointer:
+        resumed = resume_workflow(run_id, approved, factory, checkpointer)
     assert resumed["patch_approved"] is approved
     assert resumed["report"]["patch_approved"] == int(approved)
     assert resumed["report_id"] == resumed["report"]["id"]
@@ -297,6 +354,7 @@ def test_workflow_retries_failed_tests_then_persists_report(
     workspace = str(tmp_path / "retry-clone")
     barrier = Barrier(2, timeout=5)
     hypothesis_failures = []
+    checkpointer = MemorySaver()
 
     def analyze_log(stack_trace, description):
         barrier.wait()
@@ -368,14 +426,15 @@ def test_workflow_retries_failed_tests_then_persists_report(
             "branch": "main",
         },
         factory,
+        checkpointer,
     )
     assert started.get("__interrupt__")
 
-    retry_wait = resume_workflow(run_id, True, factory)
+    retry_wait = resume_workflow(run_id, True, factory, checkpointer)
     assert retry_wait["iteration"] == 2
     assert retry_wait.get("__interrupt__")
 
-    finished = resume_workflow(run_id, True, factory)
+    finished = resume_workflow(run_id, True, factory, checkpointer)
     assert finished["report"]["test_results"]
     assert finished["report"]["iteration_count"] == 2
     assert len(hypothesis_failures) == 2
@@ -392,3 +451,108 @@ def test_workflow_retries_failed_tests_then_persists_report(
         assert sum(step.step_name == "test_runner" for step in steps) == 2
         assert sum(step.step_name == "hypothesis" for step in steps) == 2
         assert sum(step.step_name == "awaiting_approval" for step in steps) == 2
+
+
+def test_approved_local_patch_updates_source_only_after_approval(
+    workflow_db,
+    monkeypatch,
+    tmp_path,
+):
+    from git import Repo
+
+    factory, run_id = workflow_db
+    source = tmp_path / "source-repository"
+    (source / "tests").mkdir(parents=True)
+    (source / "pricing.py").write_text(
+        "def calculate_discount(total, coupon_rate=None):\n"
+        "    if coupon_rate is None:\n"
+        "        return total\n"
+        "    return total * coupon_rate\n",
+        encoding="utf-8",
+    )
+    (source / "tests" / "test_pricing.py").write_text(
+        "from pricing import calculate_discount\n\n"
+        "def test_coupon_discount():\n"
+        "    assert calculate_discount(100, 0.25) == 75\n\n"
+        "def test_no_coupon():\n"
+        "    assert calculate_discount(100) == 100\n",
+        encoding="utf-8",
+    )
+    repo = Repo.init(source, initial_branch="main")
+    with repo.config_writer() as config:
+        config.set_value("user", "name", "DevLoop Test")
+        config.set_value("user", "email", "devloop@example.invalid")
+    repo.index.add(["pricing.py", "tests/test_pricing.py"])
+    repo.index.commit("Add coupon pricing and tests")
+
+    monkeypatch.setattr(
+        "backend.agents.log_analysis.analyze_log",
+        lambda *args: {"exception": "AssertionError", "module": "", "line": 0},
+    )
+    monkeypatch.setattr(
+        "backend.agents.file_identification.identify_files",
+        lambda *args: {
+            "files": [
+                {"path": "pricing.py", "relevance_reason": "Pricing formula", "rank": 1},
+                {"path": "tests/test_pricing.py", "relevance_reason": "Expected result", "rank": 2},
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        "backend.agents.hypothesis.generate_hypothesis",
+        lambda *args: {
+            "root_cause": "The coupon rate is used as the final price.",
+            "affected_files": ["pricing.py"],
+            "fix_strategy": "Subtract the coupon rate from one before multiplying.",
+            "confidence": 0.99,
+        },
+    )
+    patch = (
+        "diff --git a/pricing.py b/pricing.py\n"
+        "--- a/pricing.py\n"
+        "+++ b/pricing.py\n"
+        "@@ -1,4 +1,4 @@\n"
+        " def calculate_discount(total, coupon_rate=None):\n"
+        "     if coupon_rate is None:\n"
+        "         return total\n"
+        "-    return total * coupon_rate\n"
+        "+    return total * (1 - coupon_rate)\n"
+    )
+    monkeypatch.setattr(
+        "backend.agents.patch.generate_patch",
+        lambda *args: {
+            "patch": patch,
+            "files_changed": ["pricing.py"],
+            "explanation": "Return the remaining balance.",
+        },
+    )
+
+    checkpoint_path = tmp_path / "local-apply-checkpoints.sqlite"
+    with SqliteSaver.from_conn_string(str(checkpoint_path)) as checkpointer:
+        paused = run_workflow(
+            run_id,
+            {
+                "title": "Coupon total is wrong",
+                "description": "A 25% coupon should leave 75% of the total.",
+                "repo_url": str(source),
+                "repository_type": "local",
+                "apply_to_source": True,
+                "branch": "main",
+                "test_command": "pytest -q",
+            },
+            factory,
+            checkpointer,
+        )
+    pricing_file = source / "pricing.py"
+    assert "return total * coupon_rate" in pricing_file.read_text(encoding="utf-8")
+    assert paused.get("__interrupt__")
+
+    with SqliteSaver.from_conn_string(str(checkpoint_path)) as checkpointer:
+        completed = resume_workflow(run_id, True, factory, checkpointer)
+
+    assert completed["patch_applied"] is True
+    assert completed["test_output"]["passed"] == 2
+    assert completed["test_output"]["failed"] == 0
+    assert "return total * (1 - coupon_rate)" in pricing_file.read_text(encoding="utf-8")
+    with factory() as db:
+        assert db.get(WorkflowRun, run_id).status == "completed"

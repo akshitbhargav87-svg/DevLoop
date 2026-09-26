@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import hashlib
 import tempfile
 from pathlib import Path
 from os import PathLike
@@ -62,6 +63,56 @@ def read_file(workspace: str | os.PathLike[str], rel_path: str) -> str:
     if not path.is_file():
         raise IsADirectoryError(f"Not a file: {rel_path}")
     return path.read_text(encoding="utf-8")
+
+
+def hash_files(
+    workspace: str | os.PathLike[str],
+    rel_paths: list[str],
+) -> dict[str, str]:
+    """Hash regular files inside a repository using their exact bytes."""
+    root = _workspace_path(workspace)
+    hashes: dict[str, str] = {}
+    for rel_path in rel_paths:
+        candidate = root / rel_path
+        path = _inside_workspace(root, rel_path)
+        if candidate.is_symlink() or not path.is_file():
+            raise ValueError(f"Patch target is not a regular repository file: {rel_path}")
+        content = path.read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+        hashes[rel_path] = hashlib.sha256(content).hexdigest()
+    return hashes
+
+
+def verify_source_checkout(
+    source: str | os.PathLike[str],
+    expected_branch: str,
+    expected_revision: str,
+    expected_file_hashes: dict[str, str],
+) -> str:
+    """Reject applying to a source checkout that changed after the run began."""
+    root = _workspace_path(source)
+    repo = Repo(str(root), search_parent_directories=False)
+    try:
+        active_branch = repo.active_branch.name
+    except TypeError as exc:
+        raise RuntimeError("The source repository is no longer on a branch.") from exc
+    if active_branch != expected_branch:
+        raise RuntimeError(
+            f"The source branch changed from '{expected_branch}' to '{active_branch}'."
+        )
+    if repo.head.commit.hexsha != expected_revision:
+        raise RuntimeError("The source repository has new commits; refusing to apply the patch.")
+    current_hashes = hash_files(root, list(expected_file_hashes))
+    changed_paths = [
+        path
+        for path, expected_hash in expected_file_hashes.items()
+        if current_hashes.get(path) != expected_hash
+    ]
+    if changed_paths:
+        raise RuntimeError(
+            "Patch target files changed after analysis; refusing to overwrite: "
+            + ", ".join(changed_paths)
+        )
+    return str(root)
 
 
 def grep_symbol(workspace: str | os.PathLike[str], symbol: str) -> list[dict[str, object]]:

@@ -6,7 +6,14 @@ from pathlib import Path
 import pytest
 
 from backend.tools.git_tools import recent_commits, show_commit_diff
-from backend.tools.repo_tools import clone_repo, grep_symbol, list_files, read_file
+from backend.tools.repo_tools import (
+    clone_repo,
+    grep_symbol,
+    hash_files,
+    list_files,
+    read_file,
+    verify_source_checkout,
+)
 from backend.tools.test_tools import _sanitize_patch, apply_patch, run_pytest, validate_patch
 
 
@@ -42,6 +49,41 @@ def test_list_read_and_grep(demo_copy: Path) -> None:
 def test_read_file_rejects_traversal(demo_copy: Path) -> None:
     with pytest.raises(ValueError):
         read_file(demo_copy, "../outside.txt")
+
+
+def test_verify_source_checkout_rejects_modified_patch_target(demo_copy: Path) -> None:
+    from git import Repo
+
+    repo = Repo(str(demo_copy), search_parent_directories=False)
+    expected_hashes = hash_files(demo_copy, ["store/pricing.py"])
+    assert verify_source_checkout(
+        demo_copy,
+        repo.active_branch.name,
+        repo.head.commit.hexsha,
+        expected_hashes,
+    ) == str(demo_copy.resolve())
+
+    pricing_file = demo_copy / "store" / "pricing.py"
+    pricing_file.write_text(
+        pricing_file.read_text(encoding="utf-8") + "\n# local edit\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="Patch target files changed"):
+        verify_source_checkout(
+            demo_copy,
+            repo.active_branch.name,
+            repo.head.commit.hexsha,
+            expected_hashes,
+        )
+
+
+def test_hash_files_normalizes_windows_line_endings(demo_copy: Path) -> None:
+    pricing_file = demo_copy / "store" / "pricing.py"
+    original = pricing_file.read_bytes()
+    expected_hash = hash_files(demo_copy, ["store/pricing.py"])
+    pricing_file.write_bytes(original.replace(b"\n", b"\r\n"))
+
+    assert hash_files(demo_copy, ["store/pricing.py"]) == expected_hash
 
 
 def test_git_history_and_diff(demo_copy: Path) -> None:
