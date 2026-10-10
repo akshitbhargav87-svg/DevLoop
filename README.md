@@ -37,7 +37,10 @@ File identification ─────┘
                            ↙               ↘
                        pass               fail
                         ↓                   ↓
-                    Report             retry loop
+                Optional GitHub push   retry loop
+                 (new fix branch)          ↓
+                        ↓                Report
+                    Report
 ~~~
 
 The system is designed so an LLM proposes a repair, while repository-aware validation and tests decide whether that proposal is safe enough to reach human review.
@@ -593,3 +596,22 @@ The implementation has been exercised against a real Git repository and verified
 ## License
 
 No separate open-source license is currently declared in this repository. Unless a license is added, the repository remains subject to the default copyright rules applicable to its owner.
+
+
+### 11. Optional verified GitHub publishing
+
+For Git repository URLs, the New Debug Run form includes an opt-in **Publish verified fix to a new GitHub branch** option. When selected, DevLoop attempts publishing only after the developer approves the patch, the patch is applied successfully, and post-apply tests pass.
+
+- The publisher creates a branch named `devloop/fix-<run-id>` from the cloned base branch.
+- Only the patch validator's declared changed files are staged. Unexpected tracked changes, unsafe paths, and common secret files are rejected.
+- The commit is pushed to the new branch. DevLoop never pushes to the selected base branch and never merges the fix.
+- A publishing failure is reported separately from successful local verification; it does not claim that a remote branch exists unless the push succeeded.
+
+#### Configure GitHub publishing
+
+1. Create a fine-grained GitHub personal access token limited to the target repository, with **Contents: Read and write** permission.
+2. Set `GITHUB_TOKEN=your_token_here` in `backend/.env`. Keep that file local and never commit the token.
+3. Restart the backend so the environment setting is loaded.
+4. Select the publishing checkbox for a Git URL run, approve the patch, and wait for tests to pass.
+
+Without a token, publishing is unavailable. Local-only repositories cannot use the GitHub publishing option. The token is used by the backend only and is not sent to the React frontend or saved into the cloned repository's Git config.
