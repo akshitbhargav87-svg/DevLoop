@@ -37,6 +37,7 @@ class BugReportCreate(BaseModel):
     apply_to_source: bool = False
     branch: str = "main"
     test_command: str | None = None
+    publish_to_github: bool = False
 
 
 class ApprovalRequest(BaseModel):
@@ -78,6 +79,23 @@ async def create_run(
             status_code=422,
             detail="Applying patches to the source requires a local repository.",
         )
+    if request.publish_to_github:
+        if request.repository_type != "git":
+            raise HTTPException(
+                status_code=422,
+                detail="GitHub publishing requires a Git repository URL, not a local path.",
+            )
+        if not settings.github_token:
+            raise HTTPException(
+                status_code=422,
+                detail="GitHub publishing is enabled, but GITHUB_TOKEN is not configured in backend/.env.",
+            )
+        try:
+            from tools.publish_tools import canonical_github_repo_url
+
+            canonical_github_repo_url(repository)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
     if request.repository_type == "local" and not settings.allow_local_repositories:
         raise HTTPException(
             status_code=403,
@@ -138,6 +156,7 @@ async def create_run(
         "apply_to_source": request.apply_to_source,
         "branch": bug_report.branch,
         "test_command": request.test_command.strip() if request.test_command else None,
+        "publish_to_github": request.publish_to_github,
     }
     background_tasks.add_task(run_workflow, run.id, workflow_input, SessionLocal)
     return {"run_id": run.id}
