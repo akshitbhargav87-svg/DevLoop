@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     checkpoint_path: str = str(Path(__file__).resolve().parent / "workflow_checkpoints.sqlite")
     allow_local_repositories: bool = True
     access_token: str | None = None
+    github_token: str | None = None
 
     model_config = SettingsConfigDict(
         env_file=Path(__file__).resolve().parent / ".env",
