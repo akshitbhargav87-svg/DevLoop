@@ -428,8 +428,7 @@ function App() {
   const testEvidence = asRecord(stepEvidence.test_runner);
   const reportEvidence = asRecord(stepEvidence.report);
   const reportDetails = parseJsonRecord(reportEvidence.evidence);
-  const reportPayload = parseJsonRecord(reportDetails.evidence);
-  const reportPatchDetails = asRecord(reportPayload.patch);
+  const reportPatchDetails = asRecord(reportDetails.patch);
   const publicationEvidence = Object.keys(asRecord(stepEvidence.publish_fix)).length > 0
     ? asRecord(stepEvidence.publish_fix)
     : asRecord(reportPatchDetails.publication);
