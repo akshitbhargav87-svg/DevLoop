@@ -1,18 +1,46 @@
 # Python
 __pycache__/
-*.pyc
+*.py[cod]
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 
-# Backend environment
-backend/.venv/
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment variables and local secrets
+.env
+.env.*
+!.env.example
 backend/.env
-backend/devloop.db
-backend/workflow_checkpoints.sqlite*
 
-# Frontend
+# Backend runtime data and checkpoints
+backend/devloop.db
+backend/*.sqlite
+backend/*.sqlite3
+backend/*.sqlite-*
+backend/workflow_checkpoints.sqlite*
+data/
+sessions/
+bob_sessions/
+
+# Frontend dependencies and build output
 frontend/node_modules/
 frontend/dist/
+frontend/.vite/
 
-# IDE
+# Logs and temporary files
+*.log
+tmp/
+temp/
+.workspaces/
+
+# IDE and OS
 .vscode/
 .idea/
+.DS_Store
+Thumbs.db
