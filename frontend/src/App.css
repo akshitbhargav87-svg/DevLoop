@@ -1113,7 +1113,7 @@ button {
 
 .publish-link {
   width: fit-content;
-  color: var(--accent);
+  color: var(--text-purple);
   font-size: 11px;
   font-weight: 700;
   text-decoration: none;
