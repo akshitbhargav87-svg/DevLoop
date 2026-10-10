@@ -65,6 +65,23 @@ def _split_patchable_files(paths: list[str]) -> tuple[list[str], list[str]]:
         (tests if is_test else implementation).append(path)
     return implementation, tests
 
+
+def _route_after_tests(state: dict[str, Any]) -> str:
+    """Publish only after verified success; otherwise report or retry."""
+    bug_report = state.get("bug_report", {})
+    if (
+        state.get("test_passed")
+        and bug_report.get("publish_to_github")
+        and not bug_report.get("apply_to_source")
+    ):
+        return "publish_fix"
+    if bug_report.get("apply_to_source"):
+        return "report"
+    if state.get("test_passed") or state.get("iteration", 1) >= 3:
+        return "report"
+    return "prepare_retry"
+
+
 _event_queues: dict[str, asyncio.Queue[dict[str, Any]]] = {}
 _event_loops: dict[str, asyncio.AbstractEventLoop] = {}
 _event_queues_lock = Lock()
@@ -720,11 +737,23 @@ def build_workflow(
             "test_output",
             {"passed": 0, "failed": 0, "errors": [], "output_excerpt": ""},
         )
+        publication = state.get("publication")
+        if not isinstance(publication, dict):
+            bug_report = state.get("bug_report", {})
+            if not bug_report.get("publish_to_github"):
+                publication = {"status": "not_requested"}
+            elif not state.get("patch_approved"):
+                publication = {"status": "blocked", "error": "Publishing requires developer approval."}
+            elif not state.get("patch_applied"):
+                publication = {"status": "blocked", "error": "Publishing was skipped because the patch was not applied."}
+            else:
+                publication = {"status": "blocked", "error": "Publishing was skipped because post-patch tests did not pass."}
+
         patch_result = {
             **state.get("patch_result", {}),
             "approved": bool(state.get("patch_approved", False)),
             "applied": bool(state.get("patch_applied", False)),
-            "publication": state.get("publication", {"status": "not_requested"}),
+            "publication": publication,
         }
 
         def persist_report() -> dict[str, Any]:
@@ -763,18 +792,6 @@ def build_workflow(
     def after_approval(state: WorkflowState) -> str:
         return "apply_patch" if state.get("patch_approved") else "report"
 
-    def after_tests(state: WorkflowState) -> str:
-        if (
-            state.get("test_passed")
-            and state.get("bug_report", {}).get("publish_to_github")
-        ):
-            return "publish_fix"
-        if state.get("bug_report", {}).get("apply_to_source"):
-            return "report"
-        if state.get("test_passed") or state.get("iteration", 1) >= 3:
-            return "report"
-        return "prepare_retry"
-
     def dispatch_analysis(state: WorkflowState) -> list[Any]:
         return [
             Send("log_analysis", state),
@@ -812,7 +829,7 @@ def build_workflow(
     graph.add_edge("apply_patch", "test_runner")
     graph.add_conditional_edges(
         "test_runner",
-        after_tests,
+        _route_after_tests,
         {"report": "report", "publish_fix": "publish_fix", "prepare_retry": "prepare_retry"},
     )
     graph.add_edge("publish_fix", "report")
