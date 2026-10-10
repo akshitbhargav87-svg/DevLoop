@@ -5,8 +5,6 @@
 
 It combines multi-agent reasoning, repository inspection, isolated workspaces, patch validation, automated tests, and human approval into one end-to-end workflow.
 
-> **Hackathon project:** IBM Bob 2.0 Hackathon
-
 ---
 
 ## What DevLoop solves
@@ -563,15 +561,9 @@ The debugging workflow operates on an isolated workspace rather than directly ch
 
 ---
 
-## Hackathon submission evidence
+## Roadmap
 
-For IBM Bob hackathon submission requirements, task-session evidence can be placed in the repository under:
-
-~~~text
-bob_sessions/
-~~~
-
-Only include genuine task-session evidence that corresponds to the actual project work performed by each participant.
+See [ROADMAP.md](ROADMAP.md) for the focused DevLoop 2.0 upgrade plan, including regression-aware verification and a small reproducible benchmark suite.
 
 ---
 
