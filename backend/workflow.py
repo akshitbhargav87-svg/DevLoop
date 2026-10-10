@@ -40,6 +40,7 @@ class WorkflowState(TypedDict, total=False):
     previous_failures: list[str]
     report: dict[str, Any]
     report_id: str
+    publication: dict[str, Any]
 
 
 SessionFactory = Callable[[], Session]
@@ -652,6 +653,49 @@ def build_workflow(
         )
         return {"test_output": result, "test_passed": passed}
 
+    def publish_fix_node(state: WorkflowState) -> dict[str, Any]:
+        """Publish only an approved, applied patch whose post-apply tests passed."""
+        from config import settings
+        from tools.publish_tools import publish_verified_fix
+
+        bug_report = state.get("bug_report", {})
+
+        def publish() -> dict[str, Any]:
+            if not state.get("patch_approved") or not state.get("patch_applied"):
+                return {
+                    "status": "blocked",
+                    "error": "Publishing requires an approved and successfully applied patch.",
+                }
+            if not state.get("test_passed"):
+                return {
+                    "status": "blocked",
+                    "error": "Publishing is blocked because post-patch tests did not pass.",
+                }
+            try:
+                return publish_verified_fix(
+                    workspace=state.get("patch_target") or state["workspace_dir"],
+                    github_repository_url=bug_report.get("repo_url", ""),
+                    base_branch=bug_report.get("branch") or "main",
+                    run_id=state["run_id"],
+                    changed_files=state.get("patch_result", {}).get("files_changed", []),
+                    github_token=settings.github_token or "",
+                )
+            except Exception as exc:
+                # Publication failure is recorded separately. The verified local
+                # fix and test result remain useful, and the base branch is untouched.
+                return {
+                    "status": "failed",
+                    "error": str(exc) or "GitHub publishing failed for an unknown reason.",
+                }
+
+        result = record_agent_step(
+            session_factory,
+            state["run_id"],
+            "publish_fix",
+            publish,
+        )
+        return {"publication": result}
+
     def prepare_retry_node(state: WorkflowState) -> dict[str, Any]:
         output = state.get("test_output", {})
         failure = output.get("output_excerpt") or json.dumps(
@@ -680,6 +724,7 @@ def build_workflow(
             **state.get("patch_result", {}),
             "approved": bool(state.get("patch_approved", False)),
             "applied": bool(state.get("patch_applied", False)),
+            "publication": state.get("publication", {"status": "not_requested"}),
         }
 
         def persist_report() -> dict[str, Any]:
@@ -719,6 +764,11 @@ def build_workflow(
         return "apply_patch" if state.get("patch_approved") else "report"
 
     def after_tests(state: WorkflowState) -> str:
+        if (
+            state.get("test_passed")
+            and state.get("bug_report", {}).get("publish_to_github")
+        ):
+            return "publish_fix"
         if state.get("bug_report", {}).get("apply_to_source"):
             return "report"
         if state.get("test_passed") or state.get("iteration", 1) >= 3:
@@ -741,6 +791,7 @@ def build_workflow(
     graph.add_node("awaiting_approval", approval_node)
     graph.add_node("apply_patch", apply_patch_node)
     graph.add_node("test_runner", test_runner_node)
+    graph.add_node("publish_fix", publish_fix_node)
     graph.add_node("prepare_retry", prepare_retry_node)
     graph.add_node("report", report_node)
     graph.add_edge(START, "clone_repo")
@@ -762,8 +813,9 @@ def build_workflow(
     graph.add_conditional_edges(
         "test_runner",
         after_tests,
-        {"report": "report", "prepare_retry": "prepare_retry"},
+        {"report": "report", "publish_fix": "publish_fix", "prepare_retry": "prepare_retry"},
     )
+    graph.add_edge("publish_fix", "report")
     graph.add_edge("prepare_retry", "hypothesis")
     graph.add_edge("report", END)
     return graph.compile(checkpointer=checkpointer or _sqlite_checkpointer())
