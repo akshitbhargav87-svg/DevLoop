@@ -15,6 +15,7 @@ from backend.database import Base
 from backend.models import AgentStep, BugReport, ResolutionReport, WorkflowRun
 from backend.workflow import (
     _split_patchable_files,
+    _route_after_tests,
     _workspace_log_evidence,
     _workspace_file_evidence,
     get_event_queue,
@@ -24,6 +25,36 @@ from backend.workflow import (
     record_agent_step,
     remove_event_queue,
 )
+
+
+
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [
+        (
+            {"test_passed": True, "bug_report": {"publish_to_github": True, "apply_to_source": False}},
+            "publish_fix",
+        ),
+        (
+            {"test_passed": False, "iteration": 1, "bug_report": {"publish_to_github": True}},
+            "prepare_retry",
+        ),
+        (
+            {"test_passed": True, "bug_report": {"publish_to_github": False}},
+            "report",
+        ),
+        (
+            {"test_passed": False, "iteration": 3, "bug_report": {"publish_to_github": True}},
+            "report",
+        ),
+        (
+            {"test_passed": True, "bug_report": {"publish_to_github": True, "apply_to_source": True}},
+            "report",
+        ),
+    ],
+)
+def test_github_publishing_is_routed_only_after_safe_verification(state, expected):
+    assert _route_after_tests(state) == expected
 
 
 def test_patch_targets_exclude_repository_tests_but_keep_them_identified():
