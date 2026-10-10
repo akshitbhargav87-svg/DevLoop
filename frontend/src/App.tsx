@@ -82,16 +82,23 @@ const workflowStages: Omit<AgentStep, "status">[] = [
     description: "Waiting for patch",
   },
   {
+    key: "publish_fix",
+    name: "Publish Verified Fix",
+    description: "Waiting for passing tests",
+  },
+  {
     key: "report",
     name: "Resolution Report",
     description: "Waiting for verification",
   },
 ];
 
-const initialSteps: AgentStep[] = workflowStages.map((stage) => ({
-  ...stage,
-  status: "pending",
-}));
+const initialSteps: AgentStep[] = workflowStages
+  .filter((stage) => stage.key !== "publish_fix")
+  .map((stage) => ({
+    ...stage,
+    status: "pending",
+  }));
 
 function toStepStatus(status: string): StepStatus {
   if (status === "completed") {
@@ -109,11 +116,18 @@ function toStepStatus(status: string): StepStatus {
 function mapRunSteps(records: RunSnapshot["steps"]): AgentStep[] {
   const latestByName = new Map(records.map((record) => [record.step_name, record]));
 
-  return workflowStages.map((stage) => {
+  const hasPublishStep = records.some((record) => record.step_name === "publish_fix");
+  const visibleStages = hasPublishStep
+    ? workflowStages
+    : workflowStages.filter((stage) => stage.key !== "publish_fix");
+
+  return visibleStages.map((stage) => {
     const record = latestByName.get(stage.key);
+    const evidence = parseJsonRecord(record?.evidence);
+    const publishFailed = stage.key === "publish_fix" && evidence.status === "failed";
     return {
       ...stage,
-      status: record ? toStepStatus(record.status) : "pending",
+      status: publishFailed ? "failed" : record ? toStepStatus(record.status) : "pending",
     };
   });
 }
@@ -207,6 +221,7 @@ function App() {
   const [applyToSource, setApplyToSource] = useState(false);
   const [branch, setBranch] = useState("main");
   const [testCommand, setTestCommand] = useState("pytest -q");
+  const [publishToGithub, setPublishToGithub] = useState(false);
   const [bugTitle, setBugTitle] = useState("");
   const [bugDescription, setBugDescription] = useState("");
   const [stackTrace, setStackTrace] = useState("");
@@ -413,6 +428,11 @@ function App() {
   const testEvidence = asRecord(stepEvidence.test_runner);
   const reportEvidence = asRecord(stepEvidence.report);
   const reportDetails = parseJsonRecord(reportEvidence.evidence);
+  const reportPayload = parseJsonRecord(reportDetails.evidence);
+  const reportPatchDetails = asRecord(reportPayload.patch);
+  const publicationEvidence = Object.keys(asRecord(stepEvidence.publish_fix)).length > 0
+    ? asRecord(stepEvidence.publish_fix)
+    : asRecord(reportPatchDetails.publication);
   const testErrors = Array.isArray(testEvidence.errors)
     ? testEvidence.errors.filter((error): error is string => typeof error === "string")
     : [];
@@ -469,6 +489,7 @@ function App() {
           apply_to_source: repositorySource === "local" && applyToSource,
           branch,
           test_command: testCommand,
+          publish_to_github: repositorySource === "git" && publishToGithub,
         }),
       });
       const result = await response.json();
@@ -858,6 +879,40 @@ function App() {
                 {typeof reportDetails.test_results === "string" && (
                   <pre className="patch-diff">{reportDetails.test_results}</pre>
                 )}
+                {Object.keys(publicationEvidence).length > 0
+                  && publicationEvidence.status !== "not_requested" && (
+                  <div className="publish-result">
+                    <span>GITHUB PUBLISHING</span>
+                    <strong className={publicationEvidence.status === "failed" || publicationEvidence.status === "blocked" ? "output-error-text" : ""}>
+                      {publicationEvidence.status === "published"
+                        ? "Verified fix published"
+                        : publicationEvidence.status === "failed"
+                          ? "Tests passed, but publishing failed"
+                          : publicationEvidence.status === "blocked"
+                            ? "Publishing blocked"
+                            : "Publishing status unavailable"}
+                    </strong>
+                    {typeof publicationEvidence.branch === "string" && (
+                      <p className="output-detail">Branch: {publicationEvidence.branch}</p>
+                    )}
+                    {typeof publicationEvidence.commit_sha === "string" && (
+                      <p className="output-detail">Commit: {publicationEvidence.commit_sha.slice(0, 12)}</p>
+                    )}
+                    {Array.isArray(publicationEvidence.changed_files) && (
+                      <p className="output-detail">
+                        Files: {publicationEvidence.changed_files.filter((path): path is string => typeof path === "string").join(", ")}
+                      </p>
+                    )}
+                    {typeof publicationEvidence.branch_url === "string" && (
+                      <a className="publish-link" href={publicationEvidence.branch_url} target="_blank" rel="noreferrer">
+                        Open verified branch on GitHub ↗
+                      </a>
+                    )}
+                    {typeof publicationEvidence.error === "string" && (
+                      <p className="output-detail">{publicationEvidence.error}</p>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           </section>
@@ -909,7 +964,10 @@ function App() {
                             name="repository-source"
                             value="local"
                             checked={repositorySource === "local"}
-                            onChange={() => setRepositorySource("local")}
+                            onChange={() => {
+                              setRepositorySource("local");
+                              setPublishToGithub(false);
+                            }}
                           />
                           <svg aria-hidden="true" viewBox="0 0 20 20">
                             <path d="M2.5 5.5h6l1.7 2H17a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-8a1 1 0 0 1 .5-1Z" />
@@ -968,6 +1026,24 @@ function App() {
                         <strong>Apply approved patch to this checkout</strong>
                         <small>
                           Writes only after approval. The run stops if the branch or patch files change during review.
+                        </small>
+                      </span>
+                    </label>
+                  )}
+
+                  {repositorySource === "git" && (
+                    <label className="apply-source-option">
+                      <input
+                        type="checkbox"
+                        checked={publishToGithub}
+                        onChange={(event) => setPublishToGithub(event.target.checked)}
+                      />
+                      <span>
+                        <strong>Publish verified fix to a new GitHub branch</strong>
+                        <small>
+                          After approval and passing tests, DevLoop commits the approved files to a new
+                          devloop/fix-* branch. It never pushes to this base branch or merges the fix.
+                          Requires GITHUB_TOKEN in backend/.env.
                         </small>
                       </span>
                     </label>
